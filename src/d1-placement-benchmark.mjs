@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { cleanupTrackedResources, registerResource, unregisterResource } from "./resource-tracker.mjs";
 
 const DEFAULT_CONFIG = {
   accountId: undefined,
@@ -44,6 +45,8 @@ const VALID_D1_JURISDICTIONS = new Set(["eu", "fedramp"]);
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DEFAULT_CONFIG_PATH = "benchmark.config.json";
 let cachedWranglerInvocation;
+let activeRunContext;
+let terminationCleanupStarted = false;
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -62,6 +65,8 @@ async function main() {
   const auth = readAuthFromEnv();
   const accountId = await resolveAccountId(auth, config.accountId);
   const runId = toRunId(startedAt);
+  activeRunContext = { accountId, runId };
+  installTerminationHandlers();
   const tempDir = path.resolve(rootDir, ".benchmark-tmp", runId);
   const resultsDir = path.resolve(rootDir, config.resultsDir);
   const deployedWorkers = [];
@@ -78,7 +83,7 @@ async function main() {
   await mkdir(resultsDir, { recursive: true });
 
   try {
-    databases = await prepareDatabases({ auth, accountId, config });
+    databases = await prepareDatabases({ auth, accountId, config, runId });
     for (const database of databases) {
       console.log(
         `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "existing"}, observed=${database.observedRegion ?? "unknown"}`
@@ -118,6 +123,7 @@ async function main() {
           databases,
           placements,
           batchIndex,
+          runId,
           tempDir,
           workerSourcePath,
           deployedWorkers
@@ -191,6 +197,10 @@ async function main() {
         console.log(`Keeping disposable D1 database ${database.name}.`);
       }
     }
+
+    if (config.cleanupWorkers && config.database.deleteAfterRun !== false) {
+      await cleanupRegisteredResources({ accountId, runId });
+    }
   }
 }
 
@@ -206,6 +216,41 @@ function parseArgs(argv) {
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
+}
+
+function installTerminationHandlers() {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.once(signal, () => {
+      void handleTermination(signal);
+    });
+  }
+
+  process.once("uncaughtException", (error) => {
+    console.error(error.stack || error.message);
+    void handleTermination("uncaughtException");
+  });
+
+  process.once("unhandledRejection", (reason) => {
+    console.error(reason instanceof Error ? reason.stack || reason.message : reason);
+    void handleTermination("unhandledRejection");
+  });
+}
+
+async function handleTermination(reason) {
+  if (terminationCleanupStarted) return;
+  terminationCleanupStarted = true;
+
+  console.warn(`Benchmark interrupted by ${reason}; attempting cleanup for current run...`);
+  if (activeRunContext) {
+    try {
+      await cleanupRegisteredResources(activeRunContext);
+    } catch (error) {
+      console.warn(`Automatic cleanup did not complete: ${error.message}`);
+    }
+  }
+
+  process.exitCode = 1;
+  process.exit();
 }
 
 function requireValue(argv, index, flag) {
@@ -396,7 +441,7 @@ async function resolveAccountId(auth, configuredAccountId) {
   throw new Error(`The credential can access multiple accounts. Set accountId or CLOUDFLARE_ACCOUNT_ID. Accounts: ${choices}`);
 }
 
-async function prepareDatabases({ auth, accountId, config }) {
+async function prepareDatabases({ auth, accountId, config, runId }) {
   if (config.database.mode === "existing-db") {
     const database = await prepareOneDatabase({
       auth,
@@ -417,6 +462,14 @@ async function prepareDatabases({ auth, accountId, config }) {
   for (const location of locations) {
     const name = `${namePrefix}-${location}-${Date.now()}`;
     const createdDatabase = await createD1Database(name, { ...config.database, location, jurisdiction: undefined }, accountId);
+    await registerResource({
+      type: "d1",
+      accountId,
+      runId,
+      name,
+      id: createdDatabase.id,
+      metadata: { targetLocation: location }
+    });
     const database = await prepareOneDatabase({
       auth,
       accountId,
@@ -563,7 +616,7 @@ async function observeD1Region(auth, accountId, databaseId) {
   }
 }
 
-async function deployWorkers({ accountId, config, databases, placements, batchIndex, tempDir, workerSourcePath, deployedWorkers }) {
+async function deployWorkers({ accountId, config, databases, placements, batchIndex, runId, tempDir, workerSourcePath, deployedWorkers }) {
   const workers = [];
 
   for (const placement of placements) {
@@ -611,6 +664,14 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
     if (!url) {
       throw new Error(`Could not find workers.dev URL in Wrangler deploy output for ${workerName}.`);
     }
+    await registerResource({
+      type: "worker",
+      accountId,
+      runId,
+      name: workerName,
+      url,
+      metadata: { placement, batchIndex }
+    });
     workers.push({ name: workerName, placement, url, configPath });
   }
 
@@ -997,8 +1058,13 @@ async function cleanupWorkers(workerNames, accountId) {
       await runWrangler(["delete", workerName, "--force"], {
         CLOUDFLARE_ACCOUNT_ID: accountId
       });
+      await unregisterResource({ type: "worker", accountId, name: workerName });
     } catch (error) {
-      console.warn(`Could not delete Worker ${workerName}: ${error.message}`);
+      if (isAlreadyDeletedError(error)) {
+        await unregisterResource({ type: "worker", accountId, name: workerName });
+      } else {
+        console.warn(`Could not delete Worker ${workerName}: ${error.message}`);
+      }
     }
   }
 }
@@ -1009,9 +1075,28 @@ async function cleanupDatabase(databaseName, accountId) {
     await runWrangler(["d1", "delete", databaseName, "--skip-confirmation"], {
       CLOUDFLARE_ACCOUNT_ID: accountId
     });
+    await unregisterResource({ type: "d1", accountId, name: databaseName });
   } catch (error) {
-    console.warn(`Could not delete D1 database ${databaseName}: ${error.message}`);
+    if (isAlreadyDeletedError(error)) {
+      await unregisterResource({ type: "d1", accountId, name: databaseName });
+    } else {
+      console.warn(`Could not delete D1 database ${databaseName}: ${error.message}`);
+    }
   }
+}
+
+async function cleanupRegisteredResources({ accountId, runId }) {
+  await cleanupTrackedResources({ accountId, runId });
+}
+
+function isAlreadyDeletedError(error) {
+  const text = `${error.message || ""}\n${error.stdout || ""}\n${error.stderr || ""}`.toLowerCase();
+  return (
+    text.includes("does not exist") ||
+    text.includes("not found") ||
+    text.includes("could not find") ||
+    text.includes("code: 10090")
+  );
 }
 
 async function cfRequest(auth, route, init = {}) {

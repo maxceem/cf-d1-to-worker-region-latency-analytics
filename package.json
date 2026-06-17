@@ -6,8 +6,9 @@
   "description": "Benchmark Cloudflare Worker targeted placements against a D1 database.",
   "scripts": {
     "benchmark": "node ./src/d1-placement-benchmark.mjs",
+    "cleanup": "node ./src/resource-tracker.mjs",
     "report:html": "node ./src/build-html-report.mjs",
-    "check": "node --check ./src/d1-placement-benchmark.mjs && node --check ./src/build-html-report.mjs"
+    "check": "node --check ./src/d1-placement-benchmark.mjs && node --check ./src/benchmark-worker.mjs && node --check ./src/resource-tracker.mjs && node --check ./src/build-html-report.mjs"
   },
   "engines": {
     "node": ">=20"

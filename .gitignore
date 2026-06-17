@@ -1,4 +1,5 @@
 .benchmark-tmp/
+.benchmark-resources/
 results/
 results-*/
 node_modules/

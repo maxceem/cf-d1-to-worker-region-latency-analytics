@@ -26,6 +26,22 @@ results/summary.partial.json
 results/report.partial.md
 ```
 
+Created Cloudflare resources are tracked by [src/resource-tracker.mjs](src/resource-tracker.mjs) in:
+
+```text
+.benchmark-resources/resources.json
+```
+
+Each D1 database or Worker is added immediately after creation/deployment succeeds. Each entry is removed only after cleanup succeeds or Cloudflare confirms the resource no longer exists.
+
+If a run fails or is interrupted, the benchmark attempts to clean up the current run automatically. If cleanup cannot finish, run:
+
+```bash
+npm run cleanup
+```
+
+That cleanup command reads all remaining tracked resources from previous runs and deletes them. You can narrow it with `--run-id` or `--account-id`.
+
 ## Benchmark an existing D1 database
 
 ```bash
@@ -90,6 +106,7 @@ The token/key needs permission to read accounts, manage D1, and deploy/delete Wo
 
 ```bash
 npm run benchmark -- --config benchmark.config.json
+npm run cleanup
 npm run benchmark -- --keep-workers
 npm run benchmark -- --keep-database
 npm run benchmark -- --results-dir custom-results
