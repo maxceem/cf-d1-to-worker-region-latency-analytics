@@ -1,0 +1,14 @@
+{
+  "name": "cf-worker-d1-regions-latency-stats",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark Cloudflare Worker targeted placements against a D1 database.",
+  "scripts": {
+    "benchmark": "node ./src/d1-placement-benchmark.mjs",
+    "check": "node --check ./src/d1-placement-benchmark.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

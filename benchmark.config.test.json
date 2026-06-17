@@ -1,0 +1,28 @@
+{
+  "database": {
+    "mode": "new-db",
+    "locations": [
+      "enam",
+      "wnam"
+    ],
+    "deleteAfterRun": true
+  },
+  "workerNamePrefix": "d1-placement-bench-test",
+  "candidateProviders": [
+  ],
+  "candidatePlacements": [
+    "aws:us-east-1",
+    "aws:us-west-2"
+  ],
+  "maxWorkersPerBatch": 2,
+  "benchmark": {
+    "warmupRequests": 2,
+    "measuredRequests": 5,
+    "queriesPerRequest": 3,
+    "concurrency": 2,
+    "requestTimeoutMs": 30000
+  },
+  "cleanupWorkers": true,
+  "propagationSeconds": 10,
+  "resultsDir": "results-test"
+}

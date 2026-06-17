@@ -1,0 +1,38 @@
+{
+  "database": {
+    "mode": "new-db",
+    "locations": [
+      "weur",
+      "eeur",
+      "apac",
+      "oc",
+      "wnam",
+      "enam"
+    ],
+    "deleteAfterRun": true
+  },
+  "workerNamePrefix": "d1-placement-bench",
+  "regionFiles": {
+    "aws": "aws-regions.json",
+    "gcp": "gcp-regions.json",
+    "azure": "azure-regions.json"
+  },
+  "candidateProviders": [
+    "aws",
+    "gcp",
+    "azure"
+  ],
+  "candidatePlacements": [
+  ],
+  "maxWorkersPerBatch": 50,
+  "benchmark": {
+    "warmupRequests": 10,
+    "measuredRequests": 100,
+    "queriesPerRequest": 5,
+    "concurrency": 5,
+    "requestTimeoutMs": 30000
+  },
+  "cleanupWorkers": true,
+  "propagationSeconds": 20,
+  "resultsDir": "results"
+}

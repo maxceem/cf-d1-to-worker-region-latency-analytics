@@ -1,0 +1,9 @@
+.benchmark-tmp/
+results/
+results-*/
+node_modules/
+.env
+.dev.vars
+benchmark.config.json
+npm-debug.log*
+.DS_Store
