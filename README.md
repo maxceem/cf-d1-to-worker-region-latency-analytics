@@ -8,7 +8,7 @@ One command creates benchmark D1 databases, deploys temporary benchmark Workers 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run creates one temporary D1 database for each configured D1 location hint, seeds a small table in each, tests every configured Worker placement against every D1 database, writes `results/raw.json`, `results/summary.json`, and `results/report.md`, then deletes the temporary Workers and D1 databases.
+The default run uses `benchmark.config.json`, creates one temporary D1 database for each configured D1 location hint, seeds a small table in each, tests every configured Worker placement against every D1 database, writes `results/raw.json`, `results/summary.json`, and `results/report.md`, then deletes the temporary Workers and D1 databases.
 
 Workers are deployed in batches. The default cap is 50 Workers at a time:
 
@@ -29,7 +29,6 @@ results/report.partial.md
 ## Benchmark an existing D1 database
 
 ```bash
-cp benchmark.config.example.json benchmark.config.json
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.json
 ```
 

@@ -42,6 +42,7 @@ const DEFAULT_CONFIG = {
 const VALID_D1_LOCATIONS = new Set(["weur", "eeur", "apac", "oc", "wnam", "enam"]);
 const VALID_D1_JURISDICTIONS = new Set(["eu", "fedramp"]);
 const API_BASE = "https://api.cloudflare.com/client/v4";
+const DEFAULT_CONFIG_PATH = "benchmark.config.json";
 let cachedWranglerInvocation;
 
 async function main() {
@@ -218,10 +219,10 @@ function requireValue(argv, index, flag) {
 function printHelp() {
   console.log(`Usage:
   npm run benchmark
-  npm run benchmark -- --config benchmark.config.json
+  npm run benchmark -- --config benchmark.config.test.json
 
 Default behavior:
-  Creates D1 databases for all configured D1 location hints, expands Worker
+  Loads benchmark.config.json, creates D1 databases for configured location hints, expands Worker
   placements from provider region files, deploys Workers in batches of up to
   maxWorkersPerBatch, and tests every D1 x Worker placement pair.
 
@@ -230,7 +231,7 @@ Environment:
   CLOUDFLARE_ACCOUNT_ID      Optional account ID when the token has multiple accounts.
 
 Options:
-  -c, --config <path>        JSON config file. Defaults to a disposable D1 run.
+  -c, --config <path>        JSON config file. Defaults to benchmark.config.json.
       --results-dir <path>   Override output directory.
       --keep-workers         Do not delete benchmark Workers after the run.
       --keep-database        Do not delete a benchmark-created D1 database.
@@ -245,9 +246,9 @@ Progress files:
 
 async function loadConfig(configPath, rootDir) {
   const config = structuredClone(DEFAULT_CONFIG);
-  if (!configPath) return config;
+  const selectedConfigPath = configPath || DEFAULT_CONFIG_PATH;
 
-  const absolutePath = path.resolve(rootDir, configPath);
+  const absolutePath = path.resolve(rootDir, selectedConfigPath);
   const file = await readFile(absolutePath, "utf8");
   return mergeConfig(config, JSON.parse(file));
 }
