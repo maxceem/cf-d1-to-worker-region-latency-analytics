@@ -51,6 +51,25 @@ To reduce the matrix, edit `benchmark.config.json`. For example:
 
 `candidateProviders` expands from `aws-regions.json`, `gcp-regions.json`, and `azure-regions.json`. `candidatePlacements` adds explicit placements on top.
 
+## Visual HTML analytics
+
+Turn a finished run's `raw.json` into a single self-contained, interactive HTML page:
+
+```bash
+npm run report:html
+# or point at a specific file / output:
+npm run report:html -- --input results/raw.json --output results/report.html
+```
+
+With no arguments it reads `results/raw.json` (falling back to `results-test/raw.json`) and writes `report.html` next to it, then opens it in your default browser. Pass `--no-open` to skip that. The file embeds all data and needs no server or network.
+
+The page lets you:
+
+- See the **whole matrix** of every D1 region × Worker placement as a colored heatmap (green = faster, red = slower), with the best Worker per D1 region outlined.
+- **Filter to a single D1 region** to get its recommended Worker placement, a ranked bar chart, and a detailed stats table (avg, p50/p90/p95/p99, min/max, stddev, per-query, errors).
+- Switch the **comparison metric** (avg, p50, p90, p95, p99, min, max) and sort any table column.
+- See the global **best D1 × Worker pair** highlighted at the top.
+
 ## Credentials
 
 Recommended:
