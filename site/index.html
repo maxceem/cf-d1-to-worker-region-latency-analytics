@@ -609,10 +609,11 @@ function header() {
     '<h2 class="why">Why it matters</h2>' +
     '<div class="intro">' +
       '<div class="intro-text">' +
-        '<p class="sub">A D1 query is a round trip, and one request can fire many. A Worker far from its database ' +
-          'stacks up latency fast — Cloudflare placement fixes it by pinning the Worker next to the database.</p>' +
-        '<p class="idea-cap">But worker locations are named after AWS, GCP, and Azure regions, so the fastest one ' +
-          'per D1 region is not obvious. This benchmarks them all to find it.</p>' +
+        '<p class="sub">When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add ' +
+          'significant latency to the final response, especially when a request runs multiple sequential D1 queries.</p>' +
+        '<p class="idea-cap">Cloudflare Workers can be pinned to a specific placement region, which lets you place ' +
+          'the Worker closer to D1. The tricky part is that placement names use third-party provider regions from AWS, ' +
+          'GCP, and Azure. This benchmark helps find the best Worker region for a chosen D1 location.</p>' +
       '</div>' +
       '<div class="intro-fig">' + ideaDiagram() +
         '<p class="idea-link"><a href="https://developers.cloudflare.com/workers/configuration/placement/" ' +
@@ -1396,8 +1397,8 @@ function wire() {
 // theme switcher (persisted)
 (function initTheme() {
   const root = document.documentElement;
-  let saved = "dark";
-  try { saved = localStorage.getItem("d1theme") || "dark"; } catch (e) {}
+  let saved = "light";
+  try { saved = localStorage.getItem("d1theme") || "light"; } catch (e) {}
   root.setAttribute("data-theme", saved);
   const btn = document.getElementById("themeToggle");
   const paint = () => { btn.textContent = root.getAttribute("data-theme") === "light" ? "☀" : "☾"; };

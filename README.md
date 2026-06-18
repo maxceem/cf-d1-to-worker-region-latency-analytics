@@ -2,11 +2,11 @@
 
 When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add significant latency to the final response, especially when a request runs multiple sequential D1 queries.
 
-![](./docs/d1-worker-schema.png)
-
 Cloudflare Workers can be pinned to a specific placement region, which lets you place the Worker closer to D1. The tricky part is that placement names use third-party provider regions from AWS, GCP, and Azure. This benchmark helps find the best Worker region for a chosen D1 location.
 
 ### Best worker location per D1 region (p95)
+
+[View full analytics report](https://maxceem.github.io/cf-d1-to-worker-region-latency-analytics/)
 
 ![](./docs/site-screenshot.png)
 
