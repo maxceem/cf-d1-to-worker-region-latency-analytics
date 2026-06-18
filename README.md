@@ -16,7 +16,7 @@ Cloudflare Workers can be pinned to a specific placement region, which lets you 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks the D1 locations from [data/d1-locations.json](data/d1-locations.json) against the Worker regions from [data/*-regions.json](data/), writes results to `results/raw.json`, builds the static report, and opens it.
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks the alt the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/), writes results to `results/raw.json`, builds the static report, and opens it.
 
 The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 
@@ -26,7 +26,7 @@ The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 
 ## Partial Run
 
-If you want to test only particular pairs of D1 and Worker regions use [benchmark.config.partial.json](benchmark.config.partial.json) for a string point. 
+If you want to test only particular pairs of D1 and Worker regions use [benchmark.config.partial.json](benchmark.config.partial.json) for a starting point. 
 
 Set `workerPlacementsByD1Location`. Object keys are D1 locations; values are the Worker placements to test for that D1 location.
 
@@ -47,7 +47,7 @@ CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.
 
 ## Cleanup
 
-Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind to clean up any stale reousrce:
+Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind, then to clean up any stale reousrce run:
 
 ```bash
 npm run cleanup
