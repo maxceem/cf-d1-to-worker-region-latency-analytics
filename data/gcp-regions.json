@@ -1,4 +1,5 @@
 {
+  "provider": "gcp",
   "regions": [
     "africa-south1",
     "asia-east1",

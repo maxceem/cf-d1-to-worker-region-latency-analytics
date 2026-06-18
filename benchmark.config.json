@@ -1,28 +1,12 @@
 {
-  "database": {
-    "locations": [
-      "weur",
-      "eeur",
-      "apac",
-      "oc",
-      "wnam",
-      "enam"
-    ],
-    "deleteAfterRun": true
-  },
+  "d1DatabaseNamePrefix": "d1-placement-bench-db",
+  "deleteD1DatabasesAfterRun": true,
   "workerNamePrefix": "d1-placement-bench",
-  "regionFiles": {
-    "aws": "data/aws-regions.json",
-    "gcp": "data/gcp-regions.json",
-    "azure": "data/azure-regions.json"
-  },
-  "candidateProviders": [
-    "aws",
-    "gcp",
-    "azure"
+  "workerCompatibilityDate": "2026-06-17",
+  "workerCompatibilityFlags": [
+    "nodejs_compat"
   ],
-  "candidatePlacements": [
-  ],
+  "workerObservabilityEnabled": true,
   "maxWorkersPerBatch": 50,
   "benchmark": {
     "warmupRequests": 10,

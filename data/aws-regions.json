@@ -1,4 +1,5 @@
 {
+  "provider": "aws",
   "regions": [
     "af-south-1",
     "ap-east-1",

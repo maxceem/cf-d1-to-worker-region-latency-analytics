@@ -1,4 +1,5 @@
 {
+  "provider": "azure",
   "regions": [
     "australiacentral",
     "australiacentral2",

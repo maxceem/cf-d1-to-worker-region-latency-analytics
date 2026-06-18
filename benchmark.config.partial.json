@@ -1,19 +1,25 @@
 {
-  "database": {
-    "locations": [
-      "enam",
-      "wnam"
-    ],
-    "deleteAfterRun": true
-  },
+  "d1DatabaseNamePrefix": "d1-placement-bench-partial-db",
+  "deleteD1DatabasesAfterRun": true,
   "workerNamePrefix": "d1-placement-bench-partial",
-  "candidateProviders": [
+  "workerCompatibilityDate": "2026-06-17",
+  "workerCompatibilityFlags": [
+    "nodejs_compat"
   ],
-  "candidatePlacements": [
-    "aws:us-east-1",
-    "aws:us-west-2"
-  ],
-  "maxWorkersPerBatch": 2,
+  "workerObservabilityEnabled": true,
+  "workerPlacementsByD1Location": {
+    "enam": [
+      "aws:us-east-1",
+      "gcp:us-east4",
+      "azure:eastus2"
+    ],
+    "oc": [
+      "aws:ap-southeast-2",
+      "gcp:australia-southeast1",
+      "azure:australiaeast"
+    ]
+  },
+  "maxWorkersPerBatch": 3,
   "benchmark": {
     "warmupRequests": 2,
     "measuredRequests": 5,

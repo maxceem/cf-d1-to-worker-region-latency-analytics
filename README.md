@@ -1,122 +1,53 @@
-# D1 Placement Benchmark
+# Cloudflare D1-to-Worker Latency Analytics
 
-One command creates benchmark D1 databases, deploys temporary benchmark Workers with targeted Cloudflare placement in batches, measures Worker-to-D1 latency inside each Worker, writes raw benchmark data, and removes temporary resources.
+A D1 query is a round trip, and one request can make many D1 queries. A Worker far from its database stacks up latency fast; Cloudflare placement helps by pinning the Worker near the database.
 
-## Quick run with a disposable D1 database
+Worker placement names come from AWS, GCP, and Azure regions, so the fastest Worker location for each D1 region is not always obvious. This benchmark measures the pairings and turns the results into a small static report.
+
+## Run
 
 ```bash
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses `benchmark.config.json`, creates one temporary D1 database for each configured D1 location hint, seeds a small table in each, tests every configured Worker placement against every D1 database, writes `results/raw.json`, then deletes the temporary Workers and D1 databases.
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks the D1 locations from [data/d1-locations.json](data/d1-locations.json) against the Worker regions from [data/*-regions.json](data/), then writes results to `results/raw.json`.
 
-Workers are deployed in batches. The default cap is 50 Workers at a time:
-
-```json
-{
-  "maxWorkersPerBatch": 50
-}
-```
-
-During the run, progress is continuously written to:
-
-```text
-results/raw.partial.json
-```
-
-Created Cloudflare resources are tracked by [src/clean-resources.mjs](src/clean-resources.mjs) in:
-
-```text
-.benchmark-resources/resources.json
-```
-
-Each D1 database or Worker is added immediately after creation/deployment succeeds. Each entry is removed only after cleanup succeeds or Cloudflare confirms the resource no longer exists.
-
-If a run fails or is interrupted, the benchmark attempts to clean up the current run automatically. If cleanup cannot finish, run:
-
-```bash
-npm run cleanup
-```
-
-That cleanup command reads all remaining tracked resources from previous runs and deletes them. You can narrow it with `--run-id` or `--account-id`.
-
-## Customize a benchmark run
-
-```bash
-CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.json
-```
-
-`accountId` is optional when the token can list exactly one Cloudflare account. If your token can access multiple accounts, set either `accountId` in the config or `CLOUDFLARE_ACCOUNT_ID`.
-
-To reduce the matrix, edit `benchmark.config.json`. For example:
-
-```json
-{
-  "database": {
-    "locations": ["enam", "wnam"]
-  },
-  "candidateProviders": ["aws"],
-  "candidatePlacements": ["gcp:us-central1", "azure:eastus2"],
-  "maxWorkersPerBatch": 20
-}
-```
-
-`candidateProviders` expands from `data/aws-regions.json`, `data/gcp-regions.json`, and `data/azure-regions.json`. `candidatePlacements` adds explicit placements on top.
-
-## Static website
-
-Turn a finished run's `raw.json` into a single self-contained, interactive static website:
+Build the report:
 
 ```bash
 npm run site
-# or point at a specific file / output:
-npm run site -- --input results/raw.json --output site/index.html
 ```
 
-With no arguments it reads `results/raw.json` (falling back to `results-partial/raw.json`) and writes `site/index.html`, then opens it in your default browser. Pass `--no-open` to skip that. The file embeds all data and needs no server or network.
+The report shows the best Worker location per D1 region, the full latency matrix, and ranked per-region details.
 
-Before publishing updated results, rebuild the committed site:
+## Partial Run
+
+Use [benchmark.config.partial.json](benchmark.config.partial.json) for a smaller targeted run:
 
 ```bash
-npm run build:site
+CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.json
 ```
 
-The raw benchmark output in `results/` is ignored because it can be large. GitHub Pages deploys the prebuilt `site/` folder committed to the repository; it does not run the benchmark or rebuild the site.
+To manually choose Worker placements per D1 location, set `workerPlacementsByD1Location`. Object keys are D1 locations; values are the Worker placements to test for that D1 location.
 
-The page lets you:
-
-- See the **whole matrix** of every D1 region × Worker placement as a colored heatmap (green = faster, red = slower), with the best Worker per D1 region outlined.
-- **Filter to a single D1 region** to get its recommended Worker placement, a ranked bar chart, and a detailed stats table (avg, p50/p90/p95/p99, min/max, stddev, per-query, errors).
-- Switch the **comparison metric** (avg, p50, p90, p95, p99, min, max) and sort any table column.
-- See the global **best D1 × Worker pair** highlighted at the top.
-
-The report also includes a per-D1 **world map** (the D1 location plus an arc to every Worker location, colored by latency), embedding a simplified world basemap from `data/world-basemap.json`. Region→city coordinates come from the providers' own region documentation (AWS, Google Cloud, and Azure region lists). To add a missing or new region, edit the `PROVIDER_COORDS` / `D1_COORDS` tables in [src/build-html-site.mjs](src/build-html-site.mjs).
-
-## Credentials
-
-Recommended:
-
-```bash
-export CLOUDFLARE_API_TOKEN=...
+```json
+{
+  "d1DatabaseNamePrefix": "d1-placement-bench-partial-db",
+  "deleteD1DatabasesAfterRun": true,
+  "workerPlacementsByD1Location": {
+    "enam": ["aws:us-east-1", "gcp:us-east4", "azure:eastus2"],
+    "oc": ["aws:ap-southeast-2", "gcp:australia-southeast1", "azure:australiaeast"]
+  },
+  "maxWorkersPerBatch": 3
+}
 ```
 
-Legacy global API key auth is also supported for API calls and Wrangler if you set both:
+For every other option, check the config files directly.
+
+## Cleanup
+
+Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind:
 
 ```bash
-export CLOUDFLARE_EMAIL=you@example.com
-export CLOUDFLARE_API_KEY=...
-```
-
-The token/key needs permission to read accounts, manage D1, and deploy/delete Workers.
-
-## Useful flags
-
-```bash
-npm run benchmark -- --config benchmark.config.json
 npm run cleanup
-npm run benchmark -- --keep-workers
-npm run benchmark -- --keep-database
-npm run benchmark -- --results-dir custom-results
 ```
-
-D1 exact provider-region pinning is not exposed. D1 creation accepts only Cloudflare-supported location hints and documented jurisdictions; the benchmark records the actual observed D1 region from query metadata.

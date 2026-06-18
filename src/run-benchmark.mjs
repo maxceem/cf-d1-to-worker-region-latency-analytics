@@ -1,45 +1,16 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { cleanupTrackedResources, registerResource, unregisterResource } from "./clean-resources.mjs";
 
-const DEFAULT_CONFIG = {
-  accountId: undefined,
-  database: {
-    jurisdiction: undefined,
-    location: undefined,
-    locations: ["weur", "eeur", "apac", "oc", "wnam", "enam"],
-    namePrefix: undefined,
-    deleteAfterRun: true
-  },
-  workerNamePrefix: "d1-placement-bench",
-  regionFiles: {
-    aws: "data/aws-regions.json",
-    gcp: "data/gcp-regions.json",
-    azure: "data/azure-regions.json"
-  },
-  candidateProviders: ["aws", "gcp", "azure"],
-  candidatePlacements: [],
-  maxWorkersPerBatch: 50,
-  benchmark: {
-    warmupRequests: 10,
-    measuredRequests: 100,
-    queriesPerRequest: 5,
-    concurrency: 5,
-    requestTimeoutMs: 30000
-  },
-  cleanupWorkers: true,
-  propagationSeconds: 20,
-  resultsDir: "results"
-};
-
-const VALID_D1_LOCATIONS = new Set(["weur", "eeur", "apac", "oc", "wnam", "enam"]);
 const VALID_D1_JURISDICTIONS = new Set(["eu", "fedramp"]);
 const API_BASE = "https://api.cloudflare.com/client/v4";
+const DATA_DIR = "data";
+const D1_LOCATIONS_FILE = "d1-locations.json";
 const DEFAULT_CONFIG_PATH = "benchmark.config.json";
 let cachedWranglerInvocation;
 let activeRunContext;
@@ -55,9 +26,12 @@ async function main() {
   const startedAt = new Date();
   const rootDir = process.cwd();
   const config = await loadConfig(args.config, rootDir);
-  applyCliOverrides(config, args);
-  config.candidatePlacements = await resolveCandidatePlacements(config, rootDir);
-  validateConfig(config);
+  const benchmarkData = await loadBenchmarkData(rootDir);
+  validateConfig(config, benchmarkData);
+  const d1Locations = getConfiguredD1Locations(config, benchmarkData.d1Locations);
+  const workerPlacementsByD1Location = resolveWorkerPlacementMatrix(config, d1Locations, benchmarkData.workerPlacements);
+  const candidatePlacements = unique(Object.values(workerPlacementsByD1Location).flat());
+  validateWorkerPlacementMatrix(workerPlacementsByD1Location);
 
   const auth = readAuthFromEnv();
   const accountId = await resolveAccountId(auth, config.accountId);
@@ -80,7 +54,7 @@ async function main() {
   await mkdir(resultsDir, { recursive: true });
 
   try {
-    databases = await prepareDatabases({ auth, accountId, config, runId });
+    databases = await prepareDatabases({ auth, accountId, config, runId, d1Locations });
     for (const database of databases) {
       console.log(
         `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "unknown"}, observed=${database.observedRegion ?? "unknown"}`
@@ -96,18 +70,20 @@ async function main() {
         completedAt: undefined,
         config: redactConfig(config),
         accountId,
+        d1Locations,
+        workerPlacementsByD1Location,
         warnings: [
           "D1 exact provider-region pinning is not exposed. Creation location is a hint unless a supported jurisdiction is used."
         ]
       },
       databases: databases.map(serializeDatabase),
-      workerPlacements: config.candidatePlacements,
+      workerPlacements: candidatePlacements,
       batches: [],
       warmup: {},
       measured: {}
     };
 
-    const placementBatches = chunk(config.candidatePlacements, config.maxWorkersPerBatch);
+    const placementBatches = chunk(candidatePlacements, config.maxWorkersPerBatch);
     for (let batchIndex = 0; batchIndex < placementBatches.length; batchIndex += 1) {
       const placements = placementBatches[batchIndex];
       const batchWorkers = [];
@@ -135,10 +111,12 @@ async function main() {
         }
 
         for (const database of databases) {
+          const placementsForDatabase = new Set(workerPlacementsByD1Location[database.targetLocation] || []);
           ensureResultBucket(rawResult.warmup, database.key);
           ensureResultBucket(rawResult.measured, database.key);
 
           for (const worker of workers) {
+            if (!placementsForDatabase.has(worker.placement)) continue;
             console.log(`Warmup: D1 ${database.label} x Worker ${worker.placement}`);
             rawResult.warmup[database.key][worker.placement] = await runRequests({
               worker,
@@ -185,7 +163,7 @@ async function main() {
     for (const database of databases) {
       const shouldDeleteDatabase =
         database.created &&
-        config.database.deleteAfterRun !== false;
+        config.deleteD1DatabasesAfterRun !== false;
 
       if (shouldDeleteDatabase) {
         await cleanupDatabase(database.name, accountId);
@@ -194,7 +172,7 @@ async function main() {
       }
     }
 
-    if (config.cleanupWorkers && config.database.deleteAfterRun !== false) {
+    if (config.cleanupWorkers && config.deleteD1DatabasesAfterRun !== false) {
       await cleanupRegisteredResources({ accountId, runId });
     }
   }
@@ -206,9 +184,6 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") args.help = true;
     else if (arg === "--config" || arg === "-c") args.config = requireValue(argv, ++i, arg);
-    else if (arg === "--results-dir") args.resultsDir = requireValue(argv, ++i, arg);
-    else if (arg === "--keep-workers") args.keepWorkers = true;
-    else if (arg === "--keep-database") args.keepDatabase = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
@@ -263,9 +238,9 @@ function printHelp() {
   npm run benchmark -- --config benchmark.config.partial.json
 
 Default behavior:
-  Loads benchmark.config.json, creates D1 databases for configured location hints, expands Worker
-  placements from provider region files, deploys Workers in batches of up to
-  maxWorkersPerBatch, and tests every D1 x Worker placement pair.
+  Loads benchmark.config.json, creates D1 databases from data/d1-locations.json, expands Worker
+  placements from data/*-regions.json, deploys Workers in batches of up to maxWorkersPerBatch,
+  and tests every selected D1 x Worker placement pair.
 
 Environment:
   CLOUDFLARE_API_TOKEN       Recommended Cloudflare API token.
@@ -273,9 +248,6 @@ Environment:
 
 Options:
   -c, --config <path>        JSON config file. Defaults to benchmark.config.json.
-      --results-dir <path>   Override output directory.
-      --keep-workers         Do not delete benchmark Workers after the run.
-      --keep-database        Do not delete a benchmark-created D1 database.
       --help                 Show this help.
 
 Progress files:
@@ -284,101 +256,209 @@ Progress files:
 }
 
 async function loadConfig(configPath, rootDir) {
-  const config = structuredClone(DEFAULT_CONFIG);
   const selectedConfigPath = configPath || DEFAULT_CONFIG_PATH;
-
   const absolutePath = path.resolve(rootDir, selectedConfigPath);
   const file = await readFile(absolutePath, "utf8");
-  return mergeConfig(config, JSON.parse(file));
+  return JSON.parse(file);
 }
 
-function mergeConfig(base, override) {
-  const merged = structuredClone(base);
-  for (const [key, value] of Object.entries(override)) {
-    if (value && typeof value === "object" && !Array.isArray(value) && merged[key]) {
-      merged[key] = { ...merged[key], ...value };
-    } else {
-      merged[key] = value;
+async function loadBenchmarkData(rootDir) {
+  const dataDir = path.resolve(rootDir, DATA_DIR);
+  const d1Data = JSON.parse(await readFile(path.join(dataDir, D1_LOCATIONS_FILE), "utf8"));
+  if (
+    !Array.isArray(d1Data.locations) ||
+    d1Data.locations.length === 0 ||
+    d1Data.locations.some((location) => typeof location !== "string" || !location)
+  ) {
+    throw new Error(`${path.join(DATA_DIR, D1_LOCATIONS_FILE)} must contain a non-empty string locations array.`);
+  }
+
+  const regionFiles = (await readdir(dataDir))
+    .filter((fileName) => fileName.endsWith("-regions.json"))
+    .sort();
+  if (regionFiles.length === 0) {
+    throw new Error(`${DATA_DIR} must contain at least one *-regions.json file.`);
+  }
+
+  const providers = new Set();
+  const workerPlacements = [];
+  for (const fileName of regionFiles) {
+    const relativePath = path.join(DATA_DIR, fileName);
+    const regionData = JSON.parse(await readFile(path.join(dataDir, fileName), "utf8"));
+    if (typeof regionData.provider !== "string" || regionData.provider.length === 0) {
+      throw new Error(`${relativePath} must contain a non-empty provider string.`);
     }
+    if (providers.has(regionData.provider)) {
+      throw new Error(`${relativePath} declares duplicate provider ${regionData.provider}.`);
+    }
+    providers.add(regionData.provider);
+    if (
+      !Array.isArray(regionData.regions) ||
+      regionData.regions.length === 0 ||
+      regionData.regions.some((region) => typeof region !== "string" || !region)
+    ) {
+      throw new Error(`${relativePath} must contain a non-empty string regions array.`);
+    }
+    workerPlacements.push(...regionData.regions.map((region) => `${regionData.provider}:${region}`));
   }
-  if (override.benchmark) {
-    merged.benchmark = { ...base.benchmark, ...override.benchmark };
-  }
-  if (override.database) {
-    merged.database = { ...base.database, ...override.database };
-  }
-  if (override.regionFiles) {
-    merged.regionFiles = { ...base.regionFiles, ...override.regionFiles };
-  }
-  return merged;
+
+  return {
+    d1Locations: unique(d1Data.locations),
+    workerPlacements: unique(workerPlacements)
+  };
 }
 
-function applyCliOverrides(config, args) {
-  if (args.resultsDir) config.resultsDir = args.resultsDir;
-  if (args.keepWorkers) config.cleanupWorkers = false;
-  if (args.keepDatabase) config.database.deleteAfterRun = false;
-}
-
-function validateConfig(config) {
-  if (config.database.jurisdiction && !VALID_D1_JURISDICTIONS.has(config.database.jurisdiction)) {
+function validateConfig(config, benchmarkData) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error("Config must be a JSON object.");
+  }
+  if ("regionFiles" in config) {
+    throw new Error("regionFiles was removed. Add provider fields to data/*-regions.json instead.");
+  }
+  if ("candidateProviders" in config) {
+    throw new Error("candidateProviders was removed. All data/*-regions.json files are used by default.");
+  }
+  requireString(config.d1DatabaseNamePrefix, "d1DatabaseNamePrefix");
+  requireBoolean(config.deleteD1DatabasesAfterRun, "deleteD1DatabasesAfterRun");
+  if ("database" in config) {
+    requirePlainObject(config.database, "database");
+  }
+  const databaseConfig = config.database || {};
+  if ("location" in databaseConfig) {
+    requireString(databaseConfig.location, "database.location");
+  }
+  if (databaseConfig.jurisdiction && !VALID_D1_JURISDICTIONS.has(databaseConfig.jurisdiction)) {
     throw new Error(`database.jurisdiction must be one of: ${[...VALID_D1_JURISDICTIONS].join(", ")}`);
   }
-  if (config.database.location && !VALID_D1_LOCATIONS.has(config.database.location)) {
-    throw new Error(`database.location must be one of: ${[...VALID_D1_LOCATIONS].join(", ")}`);
+  const validD1Locations = new Set(benchmarkData.d1Locations);
+  if (databaseConfig.location && !validD1Locations.has(databaseConfig.location)) {
+    throw new Error(`database.location must be one of: ${benchmarkData.d1Locations.join(", ")}`);
   }
-  const locations = getConfiguredD1Locations(config);
+  if ("locations" in databaseConfig) {
+    if (!Array.isArray(databaseConfig.locations) || databaseConfig.locations.length === 0) {
+      throw new Error("database.locations must contain at least one D1 location when provided.");
+    }
+  }
+  const locations = getConfiguredD1Locations(config, benchmarkData.d1Locations);
   if (locations.length === 0) {
-    throw new Error("At least one database.location or database.locations value is required.");
+    throw new Error("At least one D1 location is required in data/d1-locations.json, database.location, database.locations, or workerPlacementsByD1Location.");
   }
   for (const location of locations) {
-    if (!VALID_D1_LOCATIONS.has(location)) {
+    if (!validD1Locations.has(location)) {
       throw new Error(`database.locations contains unsupported D1 location hint: ${location}`);
     }
   }
-  if (!Array.isArray(config.candidatePlacements) || config.candidatePlacements.length === 0) {
-    throw new Error("candidatePlacements must contain at least one placement region.");
-  }
-  for (const placement of config.candidatePlacements) {
-    if (typeof placement !== "string" || !placement.includes(":")) {
-      throw new Error(`Invalid placement value: ${placement}`);
+  if ("candidatePlacements" in config) {
+    if (!Array.isArray(config.candidatePlacements) || config.candidatePlacements.length === 0) {
+      throw new Error("candidatePlacements must contain at least one placement region when provided.");
+    }
+    for (const placement of config.candidatePlacements) {
+      validatePlacement(placement, "candidatePlacements");
     }
   }
+  if ("workerPlacementsByD1Location" in config) {
+    if ("candidatePlacements" in config) {
+      throw new Error("Use either candidatePlacements or workerPlacementsByD1Location, not both.");
+    }
+    requirePlainObject(config.workerPlacementsByD1Location, "workerPlacementsByD1Location");
+    for (const [location, placements] of Object.entries(config.workerPlacementsByD1Location)) {
+      if (!validD1Locations.has(location)) {
+        throw new Error(`workerPlacementsByD1Location contains unsupported D1 location hint: ${location}`);
+      }
+      if (!Array.isArray(placements) || placements.length === 0) {
+        throw new Error(`workerPlacementsByD1Location.${location} must contain at least one placement region.`);
+      }
+      for (const placement of placements) {
+        validatePlacement(placement, `workerPlacementsByD1Location.${location}`);
+      }
+    }
+  }
+  requireString(config.workerNamePrefix, "workerNamePrefix");
+  requireString(config.workerCompatibilityDate, "workerCompatibilityDate");
+  if (!Array.isArray(config.workerCompatibilityFlags)) {
+    throw new Error("workerCompatibilityFlags must be an array.");
+  }
+  for (const flag of config.workerCompatibilityFlags) {
+    requireString(flag, "workerCompatibilityFlags[]");
+  }
+  requireBoolean(config.workerObservabilityEnabled, "workerObservabilityEnabled");
   if (!Number.isInteger(config.maxWorkersPerBatch) || config.maxWorkersPerBatch < 1) {
     throw new Error("maxWorkersPerBatch must be a positive integer.");
   }
+  requirePlainObject(config.benchmark, "benchmark");
   for (const key of ["warmupRequests", "measuredRequests", "queriesPerRequest", "concurrency", "requestTimeoutMs"]) {
     if (!Number.isInteger(config.benchmark[key]) || config.benchmark[key] < 1) {
       throw new Error(`benchmark.${key} must be a positive integer.`);
     }
   }
+  requireBoolean(config.cleanupWorkers, "cleanupWorkers");
+  if (!Number.isInteger(config.propagationSeconds) || config.propagationSeconds < 0) {
+    throw new Error("propagationSeconds must be a non-negative integer.");
+  }
+  requireString(config.resultsDir, "resultsDir");
 }
 
-async function resolveCandidatePlacements(config, rootDir) {
-  const placements = [];
-
-  if (Array.isArray(config.candidatePlacements)) {
-    placements.push(...config.candidatePlacements);
+function resolveWorkerPlacementMatrix(config, d1Locations, dataWorkerPlacements) {
+  if (config.workerPlacementsByD1Location) {
+    return Object.fromEntries(
+      d1Locations.map((location) => {
+        const placements = config.workerPlacementsByD1Location[location];
+        if (!placements) {
+          throw new Error(`workerPlacementsByD1Location must include ${location} because it is selected as a D1 location.`);
+        }
+        return [location, unique(placements)];
+      })
+    );
   }
 
-  for (const provider of config.candidateProviders || []) {
-    const regionFile = config.regionFiles?.[provider];
-    if (!regionFile) {
-      throw new Error(`No regionFiles entry configured for provider: ${provider}`);
-    }
-    const absolutePath = path.resolve(rootDir, regionFile);
-    const regionData = JSON.parse(await readFile(absolutePath, "utf8"));
-    if (!Array.isArray(regionData.regions)) {
-      throw new Error(`${regionFile} must contain a regions array.`);
-    }
-    placements.push(...regionData.regions.map((region) => `${provider}:${region}`));
-  }
-
-  return unique(placements);
+  const placements = config.candidatePlacements ? unique(config.candidatePlacements) : dataWorkerPlacements;
+  return Object.fromEntries(d1Locations.map((location) => [location, placements]));
 }
 
-function getConfiguredD1Locations(config) {
-  if (config.database.location) return [config.database.location];
-  return unique(config.database.locations || []);
+function validateWorkerPlacementMatrix(workerPlacementsByD1Location) {
+  const placements = Object.values(workerPlacementsByD1Location).flat();
+  if (placements.length === 0) {
+    throw new Error("At least one Worker placement is required.");
+  }
+  for (const placement of placements) {
+    validatePlacement(placement, "worker placement");
+  }
+}
+
+function getConfiguredD1Locations(config, dataD1Locations) {
+  const databaseConfig = config.database || {};
+  if (databaseConfig.location) return [databaseConfig.location];
+  if (Array.isArray(databaseConfig.locations) && databaseConfig.locations.length > 0) {
+    return unique(databaseConfig.locations);
+  }
+  if (config.workerPlacementsByD1Location) {
+    return Object.keys(config.workerPlacementsByD1Location);
+  }
+  return dataD1Locations;
+}
+
+function validatePlacement(placement, fieldName) {
+  if (typeof placement !== "string" || !/^[^:\s]+:[^:\s]+$/.test(placement)) {
+    throw new Error(`Invalid ${fieldName} placement value: ${placement}`);
+  }
+}
+
+function requirePlainObject(value, fieldName) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an object.`);
+  }
+}
+
+function requireString(value, fieldName) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string.`);
+  }
+}
+
+function requireBoolean(value, fieldName) {
+  if (typeof value !== "boolean") {
+    throw new Error(`${fieldName} must be a boolean.`);
+  }
 }
 
 function readAuthFromEnv() {
@@ -427,15 +507,16 @@ async function resolveAccountId(auth, configuredAccountId) {
   throw new Error(`The credential can access multiple accounts. Set accountId or CLOUDFLARE_ACCOUNT_ID. Accounts: ${choices}`);
 }
 
-async function prepareDatabases({ auth, accountId, config, runId }) {
-  const locations = getConfiguredD1Locations(config);
-  const namePrefix = config.database.namePrefix || `${config.workerNamePrefix}-db`;
+async function prepareDatabases({ auth, accountId, config, runId, d1Locations }) {
+  const locations = d1Locations;
+  const namePrefix = config.d1DatabaseNamePrefix;
+  const databaseConfig = config.database || {};
   const databases = [];
 
   console.log(`Creating ${locations.length} disposable D1 databases before Worker tests...`);
   for (const location of locations) {
     const name = `${namePrefix}-${location}-${Date.now()}`;
-    const createdDatabase = await createD1Database(name, { ...config.database, location, jurisdiction: undefined }, accountId);
+    const createdDatabase = await createD1Database(name, { ...databaseConfig, location, jurisdiction: undefined }, accountId);
     await registerResource({
       type: "d1",
       accountId,
@@ -604,14 +685,14 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
       account_id: accountId,
       name: workerName,
       main: path.relative(workerDir, workerSourcePath),
-      compatibility_date: "2026-06-17",
-      compatibility_flags: ["nodejs_compat"],
+      compatibility_date: config.workerCompatibilityDate,
+      compatibility_flags: config.workerCompatibilityFlags,
       placement: {
         mode: "targeted",
         region: placement
       },
       observability: {
-        enabled: true
+        enabled: config.workerObservabilityEnabled
       },
       vars: {
         WORKER_PLACEMENT: placement,
