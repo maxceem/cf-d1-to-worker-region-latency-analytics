@@ -85,6 +85,8 @@ The page lets you:
 - Switch the **comparison metric** (avg, p50, p90, p95, p99, min, max) and sort any table column.
 - See the global **best D1 × Worker pair** highlighted at the top.
 
+The report also includes a per-D1 **world map** (the D1 location plus an arc to every Worker location, colored by latency), embedding a simplified world basemap from `src/world-basemap.json`. Region→city coordinates come from the providers' own region documentation (AWS, Google Cloud, and Azure region lists). To add a missing or new region, edit the `PROVIDER_COORDS` / `D1_COORDS` tables in [src/build-html-report.mjs](src/build-html-report.mjs).
+
 ## Credentials
 
 Recommended:

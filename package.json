@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "description": "Benchmark Cloudflare Worker targeted placements against a D1 database.",
+  "author": "Maksym Mykhailenko (https://github.com/maxceem)",
+  "license": "MIT",
   "scripts": {
     "benchmark": "node ./src/d1-placement-benchmark.mjs",
     "cleanup": "node ./src/resource-tracker.mjs",
