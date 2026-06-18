@@ -1,6 +1,5 @@
 {
   "database": {
-    "mode": "new-db",
     "locations": [
       "weur",
       "eeur",
@@ -13,9 +12,9 @@
   },
   "workerNamePrefix": "d1-placement-bench",
   "regionFiles": {
-    "aws": "aws-regions.json",
-    "gcp": "gcp-regions.json",
-    "azure": "azure-regions.json"
+    "aws": "data/aws-regions.json",
+    "gcp": "data/gcp-regions.json",
+    "azure": "data/azure-regions.json"
   },
   "candidateProviders": [
     "aws",

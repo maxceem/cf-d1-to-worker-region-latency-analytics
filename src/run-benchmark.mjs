@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { cleanupTrackedResources, registerResource, unregisterResource } from "./resource-tracker.mjs";
+import { cleanupTrackedResources, registerResource, unregisterResource } from "./clean-resources.mjs";
 
 const DEFAULT_CONFIG = {
   accountId: undefined,
   database: {
-    mode: "new-db",
-    name: undefined,
-    id: undefined,
     jurisdiction: undefined,
     location: undefined,
     locations: ["weur", "eeur", "apac", "oc", "wnam", "enam"],
@@ -21,9 +18,9 @@ const DEFAULT_CONFIG = {
   },
   workerNamePrefix: "d1-placement-bench",
   regionFiles: {
-    aws: "aws-regions.json",
-    gcp: "gcp-regions.json",
-    azure: "azure-regions.json"
+    aws: "data/aws-regions.json",
+    gcp: "data/gcp-regions.json",
+    azure: "data/azure-regions.json"
   },
   candidateProviders: ["aws", "gcp", "azure"],
   candidatePlacements: [],
@@ -86,7 +83,7 @@ async function main() {
     databases = await prepareDatabases({ auth, accountId, config, runId });
     for (const database of databases) {
       console.log(
-        `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "existing"}, observed=${database.observedRegion ?? "unknown"}`
+        `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "unknown"}, observed=${database.observedRegion ?? "unknown"}`
       );
     }
 
@@ -174,8 +171,8 @@ async function main() {
     }
 
     rawResult.run.completedAt = new Date().toISOString();
+    await writeOutputs(resultsDir, rawResult);
     const summary = buildSummary(rawResult);
-    await writeOutputs(resultsDir, rawResult, summary);
     printSummary(summary, resultsDir);
   } finally {
     await writePartialIfNeeded(resultsDir, rawResult);
@@ -188,7 +185,6 @@ async function main() {
     for (const database of databases) {
       const shouldDeleteDatabase =
         database.created &&
-        config.database.mode === "new-db" &&
         config.database.deleteAfterRun !== false;
 
       if (shouldDeleteDatabase) {
@@ -264,7 +260,7 @@ function requireValue(argv, index, flag) {
 function printHelp() {
   console.log(`Usage:
   npm run benchmark
-  npm run benchmark -- --config benchmark.config.test.json
+  npm run benchmark -- --config benchmark.config.partial.json
 
 Default behavior:
   Loads benchmark.config.json, creates D1 databases for configured location hints, expands Worker
@@ -284,8 +280,6 @@ Options:
 
 Progress files:
   results/raw.partial.json
-  results/summary.partial.json
-  results/report.partial.md
 `);
 }
 
@@ -326,27 +320,19 @@ function applyCliOverrides(config, args) {
 }
 
 function validateConfig(config) {
-  if (!["existing-db", "new-db"].includes(config.database.mode)) {
-    throw new Error('database.mode must be "existing-db" or "new-db".');
-  }
-  if (config.database.mode === "existing-db" && !config.database.name && !config.database.id) {
-    throw new Error("existing-db mode requires database.name or database.id.");
-  }
   if (config.database.jurisdiction && !VALID_D1_JURISDICTIONS.has(config.database.jurisdiction)) {
     throw new Error(`database.jurisdiction must be one of: ${[...VALID_D1_JURISDICTIONS].join(", ")}`);
   }
   if (config.database.location && !VALID_D1_LOCATIONS.has(config.database.location)) {
     throw new Error(`database.location must be one of: ${[...VALID_D1_LOCATIONS].join(", ")}`);
   }
-  if (config.database.mode === "new-db") {
-    const locations = getConfiguredD1Locations(config);
-    if (locations.length === 0) {
-      throw new Error("new-db mode requires at least one database.location or database.locations value.");
-    }
-    for (const location of locations) {
-      if (!VALID_D1_LOCATIONS.has(location)) {
-        throw new Error(`database.locations contains unsupported D1 location hint: ${location}`);
-      }
+  const locations = getConfiguredD1Locations(config);
+  if (locations.length === 0) {
+    throw new Error("At least one database.location or database.locations value is required.");
+  }
+  for (const location of locations) {
+    if (!VALID_D1_LOCATIONS.has(location)) {
+      throw new Error(`database.locations contains unsupported D1 location hint: ${location}`);
     }
   }
   if (!Array.isArray(config.candidatePlacements) || config.candidatePlacements.length === 0) {
@@ -442,20 +428,8 @@ async function resolveAccountId(auth, configuredAccountId) {
 }
 
 async function prepareDatabases({ auth, accountId, config, runId }) {
-  if (config.database.mode === "existing-db") {
-    const database = await prepareOneDatabase({
-      auth,
-      accountId,
-      databaseConfig: config.database,
-      created: false,
-      targetLocation: undefined,
-      label: config.database.name || config.database.id || "existing-db"
-    });
-    return [database];
-  }
-
   const locations = getConfiguredD1Locations(config);
-  const namePrefix = config.database.namePrefix || config.database.name || `${config.workerNamePrefix}-db`;
+  const namePrefix = config.database.namePrefix || `${config.workerNamePrefix}-db`;
   const databases = [];
 
   console.log(`Creating ${locations.length} disposable D1 databases before Worker tests...`);
@@ -679,8 +653,8 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
 }
 
 async function copyWorkerSource(rootDir, tempDir) {
-  const sourcePath = path.join(rootDir, "src", "benchmark-worker.mjs");
-  const targetPath = path.join(tempDir, "benchmark-worker.mjs");
+  const sourcePath = path.join(rootDir, "src", "benchmark-worker-source.mjs");
+  const targetPath = path.join(tempDir, "benchmark-worker-source.mjs");
   const source = await readFile(sourcePath, "utf8");
   await writeFile(targetPath, source, "utf8");
   return targetPath;
@@ -950,17 +924,13 @@ function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-async function writeOutputs(resultsDir, raw, summary) {
+async function writeOutputs(resultsDir, raw) {
   await writeFile(path.join(resultsDir, "raw.json"), `${JSON.stringify(raw, null, 2)}\n`, "utf8");
-  await writeFile(path.join(resultsDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-  await writeFile(path.join(resultsDir, "report.md"), renderReport(summary), "utf8");
+  await rm(path.join(resultsDir, "raw.partial.json"), { force: true });
 }
 
 async function persistProgress(resultsDir, raw) {
   await writeFile(path.join(resultsDir, "raw.partial.json"), `${JSON.stringify(raw, null, 2)}\n`, "utf8");
-  const summary = buildSummary(raw);
-  await writeFile(path.join(resultsDir, "summary.partial.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-  await writeFile(path.join(resultsDir, "report.partial.md"), renderReport(summary), "utf8");
 }
 
 async function writePartialIfNeeded(resultsDir, raw) {
@@ -971,51 +941,6 @@ async function writePartialIfNeeded(resultsDir, raw) {
   } catch {
     // Best-effort failure artifact only.
   }
-}
-
-function renderReport(summary) {
-  const lines = [
-    "# D1 Placement Benchmark",
-    "",
-    `D1 databases: ${summary.databases.length}`,
-    `Run time: ${summary.run.startedAt} - ${summary.run.completedAt ?? "incomplete"}`,
-    `Worker placements: ${summary.run.config.candidatePlacements.length}`,
-    `Worker batch size: ${summary.run.config.maxWorkersPerBatch}`,
-    "",
-    "## Recommendation",
-    "",
-    summary.recommendation,
-    ""
-  ];
-
-  for (const entry of Object.values(summary.byDatabase)) {
-    lines.push(`## D1 ${entry.database.label}`);
-    lines.push("");
-    lines.push(`Database: ${entry.database.name}`);
-    lines.push(`Target location hint: ${entry.database.targetLocation ?? "existing"}`);
-    lines.push(`Observed D1 region: ${entry.database.observedRegion ?? "unknown"}`);
-    lines.push("");
-    lines.push("| Rank | Worker placement | Avg | p50 | p90 | p95 | p99 | Avg/query | Errors | Worker colos | D1 regions |");
-    lines.push("|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---|");
-
-    for (const row of entry.ranked) {
-      lines.push(
-        `| ${row.rank} | ${row.placement} | ${formatMs(row.avgDbMs)} | ${formatMs(row.p50DbMs)} | ${formatMs(row.p90DbMs)} | ${formatMs(row.p95DbMs)} | ${formatMs(row.p99DbMs)} | ${formatMs(row.avgPerQueryMs)} | ${row.errorCount} | ${formatCounts(row.workerColos)} | ${formatCounts(row.d1Regions)} |`
-      );
-    }
-    lines.push("");
-    lines.push(entry.recommendation);
-    lines.push("");
-  }
-
-  lines.push("## Notes");
-  lines.push("");
-  lines.push("- Timings are measured inside the Worker around D1 calls, not from the client to the Worker.");
-  lines.push("- D1 exact provider-region pinning is not exposed. Creation location is a hint unless a documented jurisdiction is used.");
-  lines.push("- Worker placement uses Wrangler targeted placement: `placement.mode = \"targeted\"` and `placement.region = \"provider:region\"`.");
-  lines.push("");
-
-  return `${lines.join("\n")}\n`;
 }
 
 function printSummary(summary, resultsDir) {
@@ -1034,21 +959,10 @@ function printSummary(summary, resultsDir) {
   console.log("");
   console.log(summary.recommendation);
   console.log(`Wrote ${path.join(resultsDir, "raw.json")}`);
-  console.log(`Wrote ${path.join(resultsDir, "summary.json")}`);
-  console.log(`Wrote ${path.join(resultsDir, "report.md")}`);
 }
 
 function formatMs(value) {
   return isFiniteNumber(value) ? `${value.toFixed(2)}ms` : "n/a";
-}
-
-function formatCounts(counts) {
-  const entries = Object.entries(counts || {});
-  if (entries.length === 0) return "";
-  return entries
-    .sort((a, b) => b[1] - a[1])
-    .map(([key, value]) => `${key}:${value}`)
-    .join(", ");
 }
 
 async function cleanupWorkers(workerNames, accountId) {

@@ -1,13 +1,12 @@
 {
   "database": {
-    "mode": "new-db",
     "locations": [
       "enam",
       "wnam"
     ],
     "deleteAfterRun": true
   },
-  "workerNamePrefix": "d1-placement-bench-test",
+  "workerNamePrefix": "d1-placement-bench-partial",
   "candidateProviders": [
   ],
   "candidatePlacements": [
@@ -24,5 +23,5 @@
   },
   "cleanupWorkers": true,
   "propagationSeconds": 10,
-  "resultsDir": "results-test"
+  "resultsDir": "results-partial"
 }

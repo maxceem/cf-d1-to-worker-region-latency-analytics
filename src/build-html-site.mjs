@@ -1,23 +1,24 @@
 #!/usr/bin/env node
-// Build a self-contained, interactive HTML analytics report from a benchmark
+// Build a self-contained, interactive static website from a benchmark
 // raw.json file. Lets you compare Worker placements per D1 region, see the whole
 // matrix at once, or filter down to a single D1 region to pick its best Worker.
 //
 // Usage:
-//   node ./src/build-html-report.mjs [--input results/raw.json] [--output results/report.html]
+//   node ./src/build-html-site.mjs [--input results/raw.json] [--output site/index.html]
 //
-// Defaults: reads results/raw.json (falling back to results-test/raw.json) and
-// writes report.html next to the input file.
+// Defaults: reads results/raw.json (falling back to results-partial/raw.json) and
+// writes site/index.html.
 
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Public repository URL shown in the report's "Source" link. Update before deploy.
-const REPO_URL = "https://github.com/maxceem/cf-worker-d1-regions-latency-stats";
+const REPO_URL = "https://github.com/maxceem/cf-d1-to-worker-region-latency-analytics";
+const DEFAULT_OUTPUT_PATH = "site/index.html";
 
 main().catch((error) => {
   console.error(error?.stack || String(error));
@@ -35,16 +36,15 @@ async function main() {
   const raw = JSON.parse(await readFile(inputPath, "utf8"));
   const model = buildModel(raw);
   model.basemap = JSON.parse(
-    await readFile(resolve(rootDir, "src/world-basemap.json"), "utf8")
+    await readFile(resolve(rootDir, "data/world-basemap.json"), "utf8")
   );
   model.d1coords = D1_COORDS;
   model.coords = PROVIDER_COORDS;
   model.repoUrl = REPO_URL;
 
-  const outputPath = resolvePath(
-    args.output || join(dirname(inputPath), "report.html")
-  );
+  const outputPath = resolvePath(args.output || DEFAULT_OUTPUT_PATH);
   const html = renderHtml(model);
+  await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, html, "utf8");
 
   console.log(`Wrote ${outputPath}`);
@@ -92,21 +92,21 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Build an interactive HTML analytics report from benchmark raw data.
+  console.log(`Build an interactive static website from benchmark raw data.
 
 Usage:
-  node ./src/build-html-report.mjs [--input <raw.json>] [--output <report.html>]
+  node ./src/build-html-site.mjs [--input <raw.json>] [--output <site/index.html>]
 
 Options:
-  -i, --input   Path to raw.json (default: results/raw.json, else results-test/raw.json)
-  -o, --output  Path to write the HTML file (default: report.html next to the input)
-      --no-open Do not open the report in a browser after generating
+  -i, --input   Path to raw.json (default: results/raw.json, else results-partial/raw.json)
+  -o, --output  Path to write the HTML file (default: site/index.html)
+      --no-open Do not open the generated site in a browser
   -h, --help    Show this help`);
 }
 
 async function resolveInputPath(explicit) {
   if (explicit) return resolvePath(explicit);
-  for (const candidate of ["results/raw.json", "results-test/raw.json"]) {
+  for (const candidate of ["results/raw.json", "results-partial/raw.json"]) {
     const full = resolvePath(candidate);
     try {
       await readFile(full);
@@ -207,7 +207,7 @@ function summarizePair(db, placement, requests) {
   };
 }
 
-// --- stats helpers (kept in parity with d1-placement-benchmark.mjs) ---------
+// --- stats helpers (kept in parity with run-benchmark.mjs) ------------------
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);

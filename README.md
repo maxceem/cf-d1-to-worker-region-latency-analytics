@@ -1,6 +1,6 @@
 # D1 Placement Benchmark
 
-One command creates benchmark D1 databases, deploys temporary benchmark Workers with targeted Cloudflare placement in batches, measures Worker-to-D1 latency inside each Worker, writes reports, and removes temporary resources.
+One command creates benchmark D1 databases, deploys temporary benchmark Workers with targeted Cloudflare placement in batches, measures Worker-to-D1 latency inside each Worker, writes raw benchmark data, and removes temporary resources.
 
 ## Quick run with a disposable D1 database
 
@@ -8,7 +8,7 @@ One command creates benchmark D1 databases, deploys temporary benchmark Workers 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses `benchmark.config.json`, creates one temporary D1 database for each configured D1 location hint, seeds a small table in each, tests every configured Worker placement against every D1 database, writes `results/raw.json`, `results/summary.json`, and `results/report.md`, then deletes the temporary Workers and D1 databases.
+The default run uses `benchmark.config.json`, creates one temporary D1 database for each configured D1 location hint, seeds a small table in each, tests every configured Worker placement against every D1 database, writes `results/raw.json`, then deletes the temporary Workers and D1 databases.
 
 Workers are deployed in batches. The default cap is 50 Workers at a time:
 
@@ -22,11 +22,9 @@ During the run, progress is continuously written to:
 
 ```text
 results/raw.partial.json
-results/summary.partial.json
-results/report.partial.md
 ```
 
-Created Cloudflare resources are tracked by [src/resource-tracker.mjs](src/resource-tracker.mjs) in:
+Created Cloudflare resources are tracked by [src/clean-resources.mjs](src/clean-resources.mjs) in:
 
 ```text
 .benchmark-resources/resources.json
@@ -42,7 +40,7 @@ npm run cleanup
 
 That cleanup command reads all remaining tracked resources from previous runs and deletes them. You can narrow it with `--run-id` or `--account-id`.
 
-## Benchmark an existing D1 database
+## Customize a benchmark run
 
 ```bash
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.json
@@ -55,7 +53,6 @@ To reduce the matrix, edit `benchmark.config.json`. For example:
 ```json
 {
   "database": {
-    "mode": "new-db",
     "locations": ["enam", "wnam"]
   },
   "candidateProviders": ["aws"],
@@ -64,19 +61,27 @@ To reduce the matrix, edit `benchmark.config.json`. For example:
 }
 ```
 
-`candidateProviders` expands from `aws-regions.json`, `gcp-regions.json`, and `azure-regions.json`. `candidatePlacements` adds explicit placements on top.
+`candidateProviders` expands from `data/aws-regions.json`, `data/gcp-regions.json`, and `data/azure-regions.json`. `candidatePlacements` adds explicit placements on top.
 
-## Visual HTML analytics
+## Static website
 
-Turn a finished run's `raw.json` into a single self-contained, interactive HTML page:
+Turn a finished run's `raw.json` into a single self-contained, interactive static website:
 
 ```bash
-npm run report:html
+npm run site
 # or point at a specific file / output:
-npm run report:html -- --input results/raw.json --output results/report.html
+npm run site -- --input results/raw.json --output site/index.html
 ```
 
-With no arguments it reads `results/raw.json` (falling back to `results-test/raw.json`) and writes `report.html` next to it, then opens it in your default browser. Pass `--no-open` to skip that. The file embeds all data and needs no server or network.
+With no arguments it reads `results/raw.json` (falling back to `results-partial/raw.json`) and writes `site/index.html`, then opens it in your default browser. Pass `--no-open` to skip that. The file embeds all data and needs no server or network.
+
+Before publishing updated results, rebuild the committed site:
+
+```bash
+npm run build:site
+```
+
+The raw benchmark output in `results/` is ignored because it can be large. GitHub Pages deploys the prebuilt `site/` folder committed to the repository; it does not run the benchmark or rebuild the site.
 
 The page lets you:
 
@@ -85,7 +90,7 @@ The page lets you:
 - Switch the **comparison metric** (avg, p50, p90, p95, p99, min, max) and sort any table column.
 - See the global **best D1 × Worker pair** highlighted at the top.
 
-The report also includes a per-D1 **world map** (the D1 location plus an arc to every Worker location, colored by latency), embedding a simplified world basemap from `src/world-basemap.json`. Region→city coordinates come from the providers' own region documentation (AWS, Google Cloud, and Azure region lists). To add a missing or new region, edit the `PROVIDER_COORDS` / `D1_COORDS` tables in [src/build-html-report.mjs](src/build-html-report.mjs).
+The report also includes a per-D1 **world map** (the D1 location plus an arc to every Worker location, colored by latency), embedding a simplified world basemap from `data/world-basemap.json`. Region→city coordinates come from the providers' own region documentation (AWS, Google Cloud, and Azure region lists). To add a missing or new region, edit the `PROVIDER_COORDS` / `D1_COORDS` tables in [src/build-html-site.mjs](src/build-html-site.mjs).
 
 ## Credentials
 
