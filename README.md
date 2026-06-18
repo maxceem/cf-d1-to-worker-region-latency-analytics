@@ -1,8 +1,14 @@
 # Cloudflare D1-to-Worker Latency Analytics
 
-A D1 query is a round trip, and one request can make many D1 queries. A Worker far from its database stacks up latency fast; Cloudflare placement helps by pinning the Worker near the database.
+When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add significant latency to the final response, especially when a request runs multiple sequential D1 queries.
 
-Worker placement names come from AWS, GCP, and Azure regions, so the fastest Worker location for each D1 region is not always obvious. This benchmark measures the pairings and turns the results into a small static report.
+![](./docs/d1-worker-schema.png)
+
+Cloudflare Workers can be pinned to a specific placement region, which lets you place the Worker closer to D1. The tricky part is that placement names use third-party provider regions from AWS, GCP, and Azure. This benchmark helps find the best Worker region for a chosen D1 location.
+
+### Best worker location per D1 region (p95)
+
+![](./docs/site-screenshot.png)
 
 ## Run
 
@@ -10,44 +16,43 @@ Worker placement names come from AWS, GCP, and Azure regions, so the fastest Wor
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks the D1 locations from [data/d1-locations.json](data/d1-locations.json) against the Worker regions from [data/*-regions.json](data/), then writes results to `results/raw.json`.
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks the D1 locations from [data/d1-locations.json](data/d1-locations.json) against the Worker regions from [data/*-regions.json](data/), writes results to `results/raw.json`, builds the static report, and opens it.
 
-Build the report:
+The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 
-```bash
-npm run site
-```
-
-The report shows the best Worker location per D1 region, the full latency matrix, and ranked per-region details.
+- `D1:Edit`
+- `Workers Scripts:Edit`
+- `Account Settings:Read` if you do not set `accountId` in config or `CLOUDFLARE_ACCOUNT_ID`
 
 ## Partial Run
 
-Use [benchmark.config.partial.json](benchmark.config.partial.json) for a smaller targeted run:
+If you want to test only particular pairs of D1 and Worker regions use [benchmark.config.partial.json](benchmark.config.partial.json) for a string point. 
+
+Set `workerPlacementsByD1Location`. Object keys are D1 locations; values are the Worker placements to test for that D1 location.
+
+```json
+{
+  "workerPlacementsByD1Location": {
+    "enam": ["aws:us-east-1", "gcp:us-east4", "azure:eastus2"],
+    "oc": ["aws:ap-southeast-2", "gcp:australia-southeast1", "azure:australiaeast"]
+  }
+}
+```
+
+And then run benchmark using partial config:
 
 ```bash
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.json
 ```
 
-To manually choose Worker placements per D1 location, set `workerPlacementsByD1Location`. Object keys are D1 locations; values are the Worker placements to test for that D1 location.
-
-```json
-{
-  "d1DatabaseNamePrefix": "d1-placement-bench-partial-db",
-  "deleteD1DatabasesAfterRun": true,
-  "workerPlacementsByD1Location": {
-    "enam": ["aws:us-east-1", "gcp:us-east4", "azure:eastus2"],
-    "oc": ["aws:ap-southeast-2", "gcp:australia-southeast1", "azure:australiaeast"]
-  },
-  "maxWorkersPerBatch": 3
-}
-```
-
-For every other option, check the config files directly.
-
 ## Cleanup
 
-Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind:
+Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind to clean up any stale reousrce:
 
 ```bash
 npm run cleanup
 ```
+
+## License
+
+MIT

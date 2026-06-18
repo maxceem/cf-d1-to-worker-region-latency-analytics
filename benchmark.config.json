@@ -17,5 +17,7 @@
   },
   "cleanupWorkers": true,
   "propagationSeconds": 20,
-  "resultsDir": "results"
+  "resultsDir": "results",
+  "siteOutputPath": "site/index.html",
+  "openSiteAfterRun": true
 }

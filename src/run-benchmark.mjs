@@ -150,6 +150,7 @@ async function main() {
 
     rawResult.run.completedAt = new Date().toISOString();
     await writeOutputs(resultsDir, rawResult);
+    await buildAndOpenSite({ config, resultsDir, rootDir });
     const summary = buildSummary(rawResult);
     printSummary(summary, resultsDir);
   } finally {
@@ -396,6 +397,8 @@ function validateConfig(config, benchmarkData) {
     throw new Error("propagationSeconds must be a non-negative integer.");
   }
   requireString(config.resultsDir, "resultsDir");
+  requireString(config.siteOutputPath, "siteOutputPath");
+  requireBoolean(config.openSiteAfterRun, "openSiteAfterRun");
 }
 
 function resolveWorkerPlacementMatrix(config, d1Locations, dataWorkerPlacements) {
@@ -1008,6 +1011,20 @@ function isFiniteNumber(value) {
 async function writeOutputs(resultsDir, raw) {
   await writeFile(path.join(resultsDir, "raw.json"), `${JSON.stringify(raw, null, 2)}\n`, "utf8");
   await rm(path.join(resultsDir, "raw.partial.json"), { force: true });
+}
+
+async function buildAndOpenSite({ config, resultsDir, rootDir }) {
+  const inputPath = path.join(resultsDir, "raw.json");
+  const args = [
+    path.join(rootDir, "src", "build-html-site.mjs"),
+    "--input",
+    inputPath,
+    "--output",
+    config.siteOutputPath,
+    config.openSiteAfterRun ? "--open" : "--no-open"
+  ];
+  console.log(`Building benchmark report: ${config.siteOutputPath}`);
+  await runCommand(process.execPath, args);
 }
 
 async function persistProgress(resultsDir, raw) {
