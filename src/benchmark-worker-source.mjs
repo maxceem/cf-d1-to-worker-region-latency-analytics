@@ -16,25 +16,24 @@ export default {
     }
 
     const perQueryMs = [];
+    const perQueryNetworkMs = [];
     const d1Meta = [];
     const started = performance.now();
 
     for (let index = 0; index < queries; index += 1) {
       const queryStarted = performance.now();
-      let result;
-      if (index % 3 === 0) {
-        result = await db.prepare("SELECT 1 AS ok").all();
-      } else if (index % 3 === 1) {
-        result = await db.prepare("SELECT COUNT(*) AS count FROM bench_items").all();
-      } else {
-        const id = (index % 100) + 1;
-        result = await db.prepare("SELECT * FROM bench_items WHERE id = ?").bind(id).all();
-      }
-      perQueryMs.push(performance.now() - queryStarted);
+      const result = await db.prepare("SELECT 1 AS ok").all();
+      const elapsedMs = performance.now() - queryStarted;
+      const sqlDurationMs = getD1SqlDuration(result?.meta);
+      perQueryMs.push(elapsedMs);
+      perQueryNetworkMs.push(
+        typeof sqlDurationMs === "number" ? Math.max(0, elapsedMs - sqlDurationMs) : elapsedMs
+      );
       if (result?.meta) d1Meta.push(result.meta);
     }
 
     const totalMs = performance.now() - started;
+    const totalNetworkMs = perQueryNetworkMs.reduce((sum, value) => sum + value, 0);
     const colo = request.cf?.colo || request.headers.get("cf-ray")?.split("-")[1] || null;
     return json({
       workerPlacement: env.WORKER_PLACEMENT,
@@ -42,7 +41,9 @@ export default {
       workerColo: colo,
       queries,
       totalMs,
+      totalNetworkMs,
       perQueryMs,
+      perQueryNetworkMs,
       d1: summarizeD1Meta(d1Meta)
     });
   }
@@ -51,10 +52,12 @@ export default {
 function summarizeD1Meta(meta) {
   const regions = countBy(meta.map((item) => item?.served_by_region).filter(Boolean));
   const colos = countBy(meta.map((item) => item?.served_by_colo).filter(Boolean));
-  const sqlDurations = meta
-    .map((item) => item?.timings?.sql_duration_ms ?? item?.duration)
-    .filter((value) => typeof value === "number");
+  const sqlDurations = meta.map(getD1SqlDuration).filter((value) => typeof value === "number");
   return { regions, colos, sqlDurations };
+}
+
+function getD1SqlDuration(meta) {
+  return meta?.timings?.sql_duration_ms ?? meta?.duration;
 }
 
 function countBy(values) {

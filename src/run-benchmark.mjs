@@ -853,8 +853,10 @@ function buildSummary(raw) {
 function summarizePlacement({ raw, database, placement, requests }) {
   const successes = requests.filter((request) => request.ok);
   const errors = requests.filter((request) => !request.ok);
-  const serverTimes = successes.map((request) => request.body?.totalMs).filter(isFiniteNumber);
-  const perQueryTimes = successes.flatMap((request) => request.body?.perQueryMs ?? []).filter(isFiniteNumber);
+  const serverTimes = successes.map((request) => adjustedTotalMs(request.body)).filter(isFiniteNumber);
+  const rawServerTimes = successes.map((request) => request.body?.totalMs).filter(isFiniteNumber);
+  const perQueryTimes = successes.flatMap((request) => adjustedPerQueryMs(request.body)).filter(isFiniteNumber);
+  const rawPerQueryTimes = successes.flatMap((request) => request.body?.perQueryMs ?? []).filter(isFiniteNumber);
   const sqlDurations = successes.flatMap((request) => request.body?.d1?.sqlDurations ?? []).filter(isFiniteNumber);
   const workerColos = countValues(successes.map((request) => request.body?.workerColo).filter(Boolean));
   const d1Regions = mergeCounts(successes.map((request) => request.body?.d1?.regions));
@@ -883,11 +885,33 @@ function summarizePlacement({ raw, database, placement, requests }) {
     maxDbMs: max(serverTimes),
     stddevDbMs: stddev(serverTimes),
     avgPerQueryMs: average(perQueryTimes),
+    avgRawDbMs: average(rawServerTimes),
+    avgRawPerQueryMs: average(rawPerQueryTimes),
     avgD1SqlDurationMs: average(sqlDurations),
     workerColos,
     d1Regions,
     d1Colos
   };
+}
+
+function adjustedTotalMs(body) {
+  if (isFiniteNumber(body?.totalNetworkMs)) return body.totalNetworkMs;
+  const adjusted = adjustedPerQueryMs(body);
+  if (adjusted.length > 0) return adjusted.reduce((sum, value) => sum + value, 0);
+  return body?.totalMs;
+}
+
+function adjustedPerQueryMs(body) {
+  if (Array.isArray(body?.perQueryNetworkMs) && body.perQueryNetworkMs.length > 0) {
+    return body.perQueryNetworkMs;
+  }
+
+  const perQuery = Array.isArray(body?.perQueryMs) ? body.perQueryMs : [];
+  const sqlDurations = Array.isArray(body?.d1?.sqlDurations) ? body.d1.sqlDurations : [];
+  return perQuery.map((value, index) => {
+    const sqlDuration = sqlDurations[index];
+    return isFiniteNumber(value) && isFiniteNumber(sqlDuration) ? Math.max(0, value - sqlDuration) : value;
+  });
 }
 
 function findWorker(raw, placement) {

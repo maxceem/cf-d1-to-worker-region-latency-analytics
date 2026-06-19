@@ -180,8 +180,10 @@ function buildModel(raw) {
 
 function summarizePair(db, placement, requests) {
   const ok = requests.filter((r) => r && r.ok && r.body);
-  const totals = ok.map((r) => r.body.totalMs).filter(isFiniteNumber);
-  const perQuery = ok.flatMap((r) => r.body.perQueryMs || []).filter(isFiniteNumber);
+  const totals = ok.map((r) => adjustedTotalMs(r.body)).filter(isFiniteNumber);
+  const rawTotals = ok.map((r) => r.body.totalMs).filter(isFiniteNumber);
+  const perQuery = ok.flatMap((r) => adjustedPerQueryMs(r.body)).filter(isFiniteNumber);
+  const rawPerQuery = ok.flatMap((r) => r.body.perQueryMs || []).filter(isFiniteNumber);
   const sqlDurations = ok
     .flatMap((r) => (r.body.d1 && r.body.d1.sqlDurations) || [])
     .filter(isFiniteNumber);
@@ -207,11 +209,33 @@ function summarizePair(db, placement, requests) {
     max: max(totals),
     stddev: stddev(totals),
     avgPerQuery: average(perQuery),
+    avgRaw: average(rawTotals),
+    avgRawPerQuery: average(rawPerQuery),
     avgSqlMs: average(sqlDurations),
     workerColos,
     d1Regions,
     d1Colos,
   };
+}
+
+function adjustedTotalMs(body) {
+  if (isFiniteNumber(body?.totalNetworkMs)) return body.totalNetworkMs;
+  const adjusted = adjustedPerQueryMs(body);
+  if (adjusted.length > 0) return adjusted.reduce((sum, value) => sum + value, 0);
+  return body?.totalMs;
+}
+
+function adjustedPerQueryMs(body) {
+  if (Array.isArray(body?.perQueryNetworkMs) && body.perQueryNetworkMs.length > 0) {
+    return body.perQueryNetworkMs;
+  }
+
+  const perQuery = Array.isArray(body?.perQueryMs) ? body.perQueryMs : [];
+  const sqlDurations = Array.isArray(body?.d1?.sqlDurations) ? body.d1.sqlDurations : [];
+  return perQuery.map((value, index) => {
+    const sqlDuration = sqlDurations[index];
+    return isFiniteNumber(value) && isFiniteNumber(sqlDuration) ? Math.max(0, value - sqlDuration) : value;
+  });
 }
 
 // --- stats helpers (kept in parity with run-benchmark.mjs) ------------------
