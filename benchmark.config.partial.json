@@ -30,6 +30,6 @@
   "cleanupWorkers": true,
   "propagationSeconds": 10,
   "resultsDir": "results-partial",
-  "siteOutputPath": "site/index.html",
+  "siteOutputPath": "docs/index.html",
   "openSiteAfterRun": true
 }

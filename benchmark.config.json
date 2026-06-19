@@ -18,6 +18,6 @@
   "cleanupWorkers": true,
   "propagationSeconds": 20,
   "resultsDir": "results",
-  "siteOutputPath": "site/index.html",
+  "siteOutputPath": "docs/index.html",
   "openSiteAfterRun": true
 }

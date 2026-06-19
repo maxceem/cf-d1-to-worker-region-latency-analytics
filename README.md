@@ -8,7 +8,7 @@ This benchmark measures the latency between D1 and a Worker when that Worker is 
 
 [View full analytics report](https://maxceem.github.io/cf-d1-to-worker-region-latency-analytics/)
 
-![](./docs/site-screenshot.png)
+![](./images/site-screenshot.png)
 
 ## Run
 

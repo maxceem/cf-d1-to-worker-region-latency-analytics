@@ -4,10 +4,10 @@
 // matrix at once, or filter down to a single D1 region to pick its best Worker.
 //
 // Usage:
-//   node ./src/build-html-site.mjs [--input results/raw.json] [--output site/index.html]
+//   node ./src/build-html-site.mjs [--input results/raw.json] [--output docs/index.html]
 //
 // Defaults: reads results/raw.json (falling back to results-partial/raw.json) and
-// writes site/index.html.
+// writes docs/index.html.
 
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -18,7 +18,7 @@ const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Public repository URL shown in the report's "Source" link. Update before deploy.
 const REPO_URL = "https://github.com/maxceem/cf-d1-to-worker-region-latency-analytics";
-const DEFAULT_OUTPUT_PATH = "site/index.html";
+const DEFAULT_OUTPUT_PATH = "docs/index.html";
 
 main().catch((error) => {
   console.error(error?.stack || String(error));
@@ -98,11 +98,11 @@ function printHelp() {
   console.log(`Build an interactive static website from benchmark raw data.
 
 Usage:
-  node ./src/build-html-site.mjs [--input <raw.json>] [--output <site/index.html>]
+  node ./src/build-html-site.mjs [--input <raw.json>] [--output <docs/index.html>]
 
 Options:
   -i, --input   Path to raw.json (default: results/raw.json, else results-partial/raw.json)
-  -o, --output  Path to write the HTML file (default: site/index.html)
+  -o, --output  Path to write the HTML file (default: docs/index.html)
       --no-open Do not open the generated site in a browser
   -h, --help    Show this help`);
 }
