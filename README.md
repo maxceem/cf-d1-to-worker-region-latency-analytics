@@ -1,8 +1,8 @@
 # Cloudflare D1-to-Worker Latency Analytics
 
-When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add significant latency to the final response, especially when a request runs multiple sequential D1 queries.
+When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add latency to the final response, especially when a request runs multiple sequential D1 queries.
 
-Cloudflare Workers can be pinned to a specific placement region, which lets you place the Worker closer to D1. The tricky part is that placement names use third-party provider regions from AWS, GCP, and Azure. This benchmark helps find the best Worker region for a chosen D1 location.
+This benchmark measures the latency between D1 and a Worker when that Worker is pinned to a specific third-party cloud region, such as AWS, GCP, or Azure, using Cloudflare's [`region` placement configuration](https://developers.cloudflare.com/workers/configuration/placement/#specify-a-cloud-region).
 
 ### Best worker location per D1 region (p95)
 
@@ -16,7 +16,7 @@ Cloudflare Workers can be pinned to a specific placement region, which lets you 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks the alt the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/), writes results to `results/raw.json`, builds the static report, and opens it.
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/), writes results to `results/raw.json`, builds the static report, and opens it.
 
 The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 
@@ -26,7 +26,7 @@ The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 
 ## Partial Run
 
-If you want to test only particular pairs of D1 and Worker regions use [benchmark.config.partial.json](benchmark.config.partial.json) for a starting point. 
+If you want to test only particular pairs of D1 and Worker regions, use [benchmark.config.partial.json](benchmark.config.partial.json) as a starting point.
 
 Set `workerPlacementsByD1Location`. Object keys are D1 locations; values are the Worker placements to test for that D1 location.
 
@@ -47,7 +47,7 @@ CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.
 
 ## Cleanup
 
-Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind, then to clean up any stale reousrce run:
+Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind, clean up any stale resources with:
 
 ```bash
 npm run cleanup

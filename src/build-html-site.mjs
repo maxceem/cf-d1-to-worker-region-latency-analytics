@@ -1039,22 +1039,19 @@ function header() {
     '<div class="intro">' +
       '<div class="intro-text">' +
         '<p class="sub">When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add ' +
-          'significant latency to the final response, especially when a request runs multiple sequential D1 queries.</p>' +
-        '<p class="idea-cap">Cloudflare Workers can be pinned to a specific placement region, which lets you place ' +
-          'the Worker closer to D1. The tricky part is that placement names use third-party provider regions from AWS, ' +
-          'GCP, and Azure. This benchmark helps find the best Worker region for a chosen D1 location.</p>' +
+          'latency to the final response, especially when a request runs multiple sequential D1 queries.</p>' +
+        '<p class="idea-cap">This benchmark measures the latency between D1 and a Worker when that Worker is pinned ' +
+          'to a specific third-party cloud region, such as AWS, GCP, or Azure, using Cloudflare ' +
+          '<a href="https://developers.cloudflare.com/workers/configuration/placement/#specify-a-cloud-region" target="_blank" rel="noopener"><code>region</code> placement configuration</a>.</p>' +
       '</div>' +
-      '<div class="intro-fig">' + ideaDiagram() +
-        '<p class="idea-link"><a href="https://developers.cloudflare.com/workers/configuration/placement/" ' +
-          'target="_blank" rel="noopener">Read the official Cloudflare placement docs &#8594;</a></p>' +
-      '</div>' +
+      '<div class="intro-fig">' + ideaDiagram() + '</div>' +
     '</div>' +
   '</div>';
 }
 
-// Recreated from Cloudflare's Workers placement docs: a far user reaches the
-// Worker in one hop, but the Worker talks to D1 many times per request — so the
-// Worker should sit next to the database, not the user.
+// Adapted from Cloudflare's Workers placement docs: a user reaches the Worker,
+// and the Worker issues D1 queries. The benchmark measures D1 latency for each
+// selected Worker placement.
 function ideaDiagram() {
   const pin = '<g class="pin"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 110-5 2.5 2.5 0 010 5z"/></g>';
   const node = (cx, loc, label, icon) =>
