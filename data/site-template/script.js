@@ -159,27 +159,27 @@ function metaFooter() {
     ? b.measuredRequests
     : Math.max.apply(null, MODEL.pairs.map(p => p.requestCount || 0).concat(0));
   const totalReq = MODEL.pairs.length * measured;
-  const item = (k, v, cls) => '<div class="det' + (cls ? " " + cls : "") + '"><div class="det-k">' + k +
-    '</div><div class="det-v' + (cls && cls.indexOf("mono") >= 0 ? " mono" : "") + '">' + v + '</div></div>';
-  const items =
-    item("Run window", esc(window), "wide") +
-    item("Duration", duration) +
-    item("D1 regions", num(MODEL.databases.length)) +
-    item("Worker locations", num(MODEL.placements.length)) +
-    item("Pairs tested", num(MODEL.pairs.length)) +
-    item("Requests per pairing", num(measured)) +
-    item("Queries per request", num(b.queriesPerRequest)) +
-    item("Concurrency", num(b.concurrency)) +
-    item("Warm-up per pairing", num(b.warmupRequests)) +
-    item("Request timeout", b.requestTimeoutMs != null ? Math.round(b.requestTimeoutMs / 1000) + " s" : "—") +
-    item("Total measured requests", num(totalReq));
+  const row = (k, v, cls) => '<tr><th scope="row">' + k + '</th><td' +
+    (cls ? ' class="' + cls + '"' : '') + '>' + v + '</td></tr>';
+  const rows =
+    row("Run window", esc(window), "long") +
+    row("Duration", duration) +
+    row("D1 regions", num(MODEL.databases.length)) +
+    row("Worker locations", num(MODEL.placements.length)) +
+    row("Pairs tested", num(MODEL.pairs.length)) +
+    row("Requests per pairing", num(measured)) +
+    row("Queries per request", num(b.queriesPerRequest)) +
+    row("Concurrency", num(b.concurrency)) +
+    row("Warm-up per pairing", num(b.warmupRequests)) +
+    row("Request timeout", b.requestTimeoutMs != null ? Math.round(b.requestTimeoutMs / 1000) + " s" : "—") +
+    row("Total measured requests", num(totalReq));
   return '<section class="details">' +
     '<h2>How this was measured</h2>' +
     '<p class="sub">Every Worker location was benchmarked against every D1 region. For each pairing we sent ' +
       num(measured) + ' timed requests' + (b.warmupRequests ? ' (after ' + num(b.warmupRequests) + ' warm-ups)' : '') +
       ', each running ' + (b.queriesPerRequest ? num(b.queriesPerRequest) + ' sequential D1 queries' : 'its D1 queries') +
       ', and recorded the round-trip latency measured inside the Worker.</p>' +
-    '<div class="detgrid">' + items + '</div>' +
+    '<table class="measure-table"><tbody>' + rows + '</tbody></table>' +
   '</section>';
 }
 
