@@ -1066,15 +1066,16 @@ function heroV10() {
 
 // 11 — Cartogram cards: a cropped world map per D1 fading into a latency band
 function heroV11() {
-  const entries = bestPerDb(state.heroM[11]);
-  const r = heroRange(entries);
+  const metricKey = state.heroM[11];
+  const entries = bestPerDb(metricKey);
+  const scale = metricScale(metricKey);
   const B = MODEL.basemap;
   let landPaths = "";
   if (B) for (const d of B.paths) landPaths += '<path d="' + d + '"/>';
   let cards = "";
   for (const e of entries) {
     const has = !!e.best;
-    const col = has ? lerpColor((e.best.value - r.lo) / r.span) : "#3a4654";
+    const col = has ? metricColor(e.best.value, scale) : "#3a4654";
     const ll = (MODEL.d1coords || {})[(e.key || "").toLowerCase()];
     let map = "";
     if (ll && B) {
@@ -1112,14 +1113,14 @@ function heroV11() {
 // 12 — Cartogram wearing the Spotlight block's skin; schemeCls recolours it.
 function cartoSpot(ver, schemeCls, kicker) {
   const entries = bestPerDb(state.metric);
-  const r = heroRange(entries);
+  const scale = metricScale(state.metric);
   const B = MODEL.basemap;
   let landPaths = "";
   if (B) for (const d of B.paths) landPaths += '<path d="' + d + '"/>';
   let cards = "";
   for (const e of entries) {
     const has = !!e.best;
-    const col = has ? lerpColor((e.best.value - r.lo) / r.span) : null;
+    const col = has ? metricColor(e.best.value, scale) : null;
     const ll = (MODEL.d1coords || {})[(e.key || "").toLowerCase()];
     let map = "";
     if (ll && B) {
@@ -1337,8 +1338,9 @@ function allRegionPanel() {
     '<div class="bars">' + bars + '</div>';
 }
 
-function metricScale() {
-  const allVals = MODEL.pairs.map(metricVal).filter(v => v != null);
+function metricScale(metricKey) {
+  const key = metricKey || state.metric;
+  const allVals = MODEL.pairs.map(p => p[key]).filter(v => v != null);
   const gMin = allVals.length ? Math.min.apply(null, allVals) : 0;
   const gMax = allVals.length ? Math.max.apply(null, allVals) : 1;
   const sortedAll = allVals.slice().sort((a, b) => a - b);
@@ -1346,6 +1348,9 @@ function metricScale() {
   const cap = q3 + 1.5 * (q3 - q1);
   const scaleMax = Math.max(gMin + 1, Math.min(gMax, cap));
   return { gMin: gMin, scaleMax: scaleMax, span: (scaleMax - gMin) || 1 };
+}
+function metricColor(v, scale) {
+  return v > scale.scaleMax ? "#e5534b" : lerpColor(Math.min(1, (v - scale.gMin) / scale.span));
 }
 
 function pairBars(pairs, winner, includeDb, scale) {
@@ -1390,8 +1395,7 @@ function regionMap(d, ranked, scale) {
     if (!c) continue;
     const pt = projXY(c[0], c[1], W, H);
     const v = metricVal(p);
-    const over = v > scale.scaleMax;
-    const col = over ? "#e5534b" : lerpColor(Math.min(1, (v - scale.gMin) / scale.span));
+    const col = metricColor(v, scale);
     arcs += '<path class="marc" d="' + arcPath(d1pt, pt) + '" stroke="' + col + '"></path>';
     dots += '<circle class="mw" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) +
       '" r="7" fill="' + col + '" data-ms="' + fmtNum(v) + '" data-loc="' + esc(p.placement) + '"></circle>';
@@ -1421,8 +1425,7 @@ function allRegionMap(pairs, scale) {
     const d1pt = projXY(d1ll[0], d1ll[1], W, H);
     const pt = projXY(c[0], c[1], W, H);
     const v = metricVal(p);
-    const over = v > scale.scaleMax;
-    const col = over ? "#e5534b" : lerpColor(Math.min(1, (v - scale.gMin) / scale.span));
+    const col = metricColor(v, scale);
     arcs += '<path class="marc" d="' + arcPath(d1pt, pt) + '" stroke="' + col + '"></path>';
     if (!byPlacement[p.placement]) {
       byPlacement[p.placement] = { placement: p.placement, pt: pt, values: [] };
@@ -1432,8 +1435,7 @@ function allRegionMap(pairs, scale) {
   for (const entry of Object.values(byPlacement)) {
     entry.values.sort((a, b) => a.value - b.value);
     const avg = entry.values.reduce((sum, item) => sum + item.value, 0) / entry.values.length;
-    const over = avg > scale.scaleMax;
-    const col = over ? "#e5534b" : lerpColor(Math.min(1, (avg - scale.gMin) / scale.span));
+    const col = metricColor(avg, scale);
     const tipRows = entry.values.map(item => ({
       db: item.db,
       value: fmtNum(item.value),
