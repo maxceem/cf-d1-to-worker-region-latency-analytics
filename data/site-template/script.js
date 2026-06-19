@@ -169,7 +169,6 @@ function metaFooter() {
     row("Pairs tested", num(MODEL.pairs.length)) +
     row("Requests per pairing", num(measured)) +
     row("Queries per request", num(b.queriesPerRequest)) +
-    row("Concurrency", num(b.concurrency)) +
     row("Warm-up per pairing", num(b.warmupRequests)) +
     row("Request timeout", b.requestTimeoutMs != null ? Math.round(b.requestTimeoutMs / 1000) + " s" : "—") +
     row("Total measured requests", num(totalReq));

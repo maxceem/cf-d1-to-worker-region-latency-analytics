@@ -169,12 +169,22 @@ function buildModel(raw) {
       completedAt: run.completedAt || null,
       accountId: run.accountId || null,
       warnings: run.warnings || [],
-      benchmark: (run.config && run.config.benchmark) || null,
+      benchmark: serializeBenchmarkConfig(run.config && run.config.benchmark),
     },
     databases,
     placements,
     pairs,
     best: best ? { dbKey: best.dbKey, placement: best.placement } : null,
+  };
+}
+
+function serializeBenchmarkConfig(benchmark) {
+  if (!benchmark || typeof benchmark !== "object" || Array.isArray(benchmark)) return null;
+  return {
+    warmupRequests: benchmark.warmupRequests,
+    measuredRequests: benchmark.measuredRequests,
+    queriesPerRequest: benchmark.queriesPerRequest,
+    requestTimeoutMs: benchmark.requestTimeoutMs,
   };
 }
 

@@ -123,7 +123,6 @@ async function main() {
               database,
               requests: config.benchmark.warmupRequests,
               queriesPerRequest: config.benchmark.queriesPerRequest,
-              concurrency: config.benchmark.concurrency,
               timeoutMs: config.benchmark.requestTimeoutMs
             });
             await persistProgress(resultsDir, rawResult);
@@ -134,7 +133,6 @@ async function main() {
               database,
               requests: config.benchmark.measuredRequests,
               queriesPerRequest: config.benchmark.queriesPerRequest,
-              concurrency: config.benchmark.concurrency,
               timeoutMs: config.benchmark.requestTimeoutMs
             });
             await persistProgress(resultsDir, rawResult);
@@ -387,7 +385,7 @@ function validateConfig(config, benchmarkData) {
     throw new Error("maxWorkersPerBatch must be a positive integer.");
   }
   requirePlainObject(config.benchmark, "benchmark");
-  for (const key of ["warmupRequests", "measuredRequests", "queriesPerRequest", "concurrency", "requestTimeoutMs"]) {
+  for (const key of ["warmupRequests", "measuredRequests", "queriesPerRequest", "requestTimeoutMs"]) {
     if (!Number.isInteger(config.benchmark[key]) || config.benchmark[key] < 1) {
       throw new Error(`benchmark.${key} must be a positive integer.`);
     }
@@ -744,20 +742,11 @@ async function copyWorkerSource(rootDir, tempDir) {
   return targetPath;
 }
 
-async function runRequests({ worker, database, requests, queriesPerRequest, concurrency, timeoutMs }) {
-  const tasks = Array.from({ length: requests }, (_, index) => index);
+async function runRequests({ worker, database, requests, queriesPerRequest, timeoutMs }) {
   const results = [];
-  let next = 0;
-
-  async function runNext() {
-    while (next < tasks.length) {
-      const requestIndex = next;
-      next += 1;
-      results[requestIndex] = await callBench(worker, database, queriesPerRequest, timeoutMs);
-    }
+  for (let requestIndex = 0; requestIndex < requests; requestIndex += 1) {
+    results[requestIndex] = await callBench(worker, database, queriesPerRequest, timeoutMs);
   }
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, runNext));
   return results;
 }
 

@@ -12,7 +12,6 @@
     "warmupRequests": 10,
     "measuredRequests": 100,
     "queriesPerRequest": 5,
-    "concurrency": 5,
     "requestTimeoutMs": 30000
   },
   "cleanupWorkers": true,
