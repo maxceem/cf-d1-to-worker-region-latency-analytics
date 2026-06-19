@@ -934,6 +934,7 @@ table.matrix th.rowhead { text-align: left; }
 .regionmap .mw { stroke: var(--map-ocean); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
 .regionmap .md1 { fill: var(--accent-2); stroke: #fff; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .regionmap .md1halo { fill: var(--accent-2); opacity: .16; }
+.regionmap .md1label { fill: var(--text); font-size: 15px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; paint-order: stroke; stroke: var(--map-ocean); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
 [data-theme="dark"] .v12pin, [data-theme="dark"] .regionmap .md1 { stroke: rgba(0,0,0,.5); }
 .regionmap .mw { cursor: pointer; transition: r .1s ease; }
 .regionmap .mw:hover { r: 9; }
@@ -941,11 +942,18 @@ table.matrix th.rowhead { text-align: left; }
   position: fixed; z-index: 100; pointer-events: none;
   background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
   padding: 8px 11px; box-shadow: 0 8px 24px rgba(0,0,0,.32);
+  max-width: min(430px, calc(100vw - 24px));
 }
 .maptip[hidden] { display: none; }
 .maptip-ms { font-size: 16px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.1; }
 .maptip-ms .u { font-size: 11px; font-weight: 600; color: var(--muted); margin-left: 2px; }
 .maptip-loc { font-size: 11.5px; color: var(--muted); margin-top: 3px; font-family: "IBM Plex Mono", monospace; }
+.maptip-list { display: grid; gap: 5px; margin-top: 7px; min-width: 170px; }
+.maptip-row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 18px; }
+.maptip-d1 { color: #111; font-weight: 700; }
+[data-theme="dark"] .maptip-d1 { color: var(--text); }
+.maptip-value { color: var(--text); font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.maptip-value .u { color: var(--muted); font-size: 10.5px; font-weight: 500; margin-left: 2px; }
 .barrow .val { text-align: left; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12.5px; white-space: nowrap; }
 .barrow .val .num { display: inline-block; min-width: 5ch; text-align: right; }
 .barrow .val .u { font-size: 10.5px; font-weight: 500; color: var(--muted); margin-left: 1px; }
@@ -1689,6 +1697,8 @@ function globalTablePanel() {
 }
 
 function regionPanel() {
+  if (state.db === "all") return allRegionPanel();
+
   const d = MODEL.databases.find(x => x.key === state.db);
   const pairs = MODEL.pairs.filter(p => p.dbKey === state.db);
   const usable = pairs.filter(p => metricVal(p) != null);
@@ -1698,46 +1708,66 @@ function regionPanel() {
   const ranked = usable.slice().sort((a, b) => metricVal(a) - metricVal(b));
   const winner = ranked[0];
 
-  // Global scale across every D1 x Worker pair for the current metric, so bar
-  // lengths and colours are comparable when switching between D1 regions.
-  const allVals = MODEL.pairs.map(metricVal).filter(v => v != null);
-  const gMin = allVals.length ? Math.min.apply(null, allVals) : 0;
-  const gMax = allVals.length ? Math.max.apply(null, allVals) : 1;
-  // Robust upper bound (Tukey fence) so a few extreme outliers (timeouts/cold
-  // starts) don't compress the scale; values above it clamp to a hatched bar.
-  const sortedAll = allVals.slice().sort((a, b) => a - b);
-  const q1 = quantile(sortedAll, 0.25), q3 = quantile(sortedAll, 0.75);
-  const cap = q3 + 1.5 * (q3 - q1);
-  const scaleMax = Math.max(gMin + 1, Math.min(gMax, cap));
-  const span = (scaleMax - gMin) || 1;
-
-  // bar chart
-  let bars = "";
-  for (const p of ranked) {
-    const v = metricVal(p);
-    const over = v > scaleMax;
-    const w = over ? 100 : Math.max(2, (v / scaleMax) * 100);
-    const t = Math.min(1, (v - gMin) / span);
-    const col = lerpColor(t);
-    const isBest = p === winner;
-    const fillStyle = over ? 'width:100%' : 'width:' + w + '%;background:' + col;
-    const fillInner = over ? '<span class="over-label">off scale &#8250;&#8250;</span>' : '';
-    bars += '<div class="barrow ' + (isBest ? "best" : "") + '">' +
-      '<div class="name" title="' + esc(p.placement) + '">' + esc(p.placement) + '</div>' +
-      '<div class="track"><div class="fill' + (over ? " over" : "") + '" style="' + fillStyle + '"' +
-        (over ? ' title="off scale (above ' + fmt(scaleMax) + ')"' : '') + '>' + fillInner + '</div></div>' +
-      '<div class="val' + (over ? " over-val" : "") + '"><span class="num">' + fmtNum(v) + '</span><span class="u">ms</span></div>' +
-    '</div>';
-  }
+  const scale = metricScale();
+  const bars = pairBars(ranked, winner, false, scale);
 
   return '<div class="mapwrap full"><div class="map-name">' + esc(dbLabel(d.key)) + '</div>' +
-      regionMap(d, ranked, gMin, scaleMax, span) + '</div>' +
+      regionMap(d, ranked, scale) + '</div>' +
     '<div class="list-title">' + esc(dbLabel(d.key)) + ' to worker locations</div>' +
     '<div class="bars">' + bars + '</div>';
 }
 
+function allRegionPanel() {
+  const usable = MODEL.pairs.filter(p => metricVal(p) != null);
+  if (!usable.length) {
+    return '<div class="panel"><div class="empty">No successful measurements.</div></div>';
+  }
+  const ranked = sortedPairs(usable);
+  const winner = usable.slice().sort((a, b) => metricVal(a) - metricVal(b))[0];
+  const scale = metricScale();
+  const bars = pairBars(ranked, winner, true, scale);
+
+  return '<div class="mapwrap full"><div class="map-name">All D1 regions</div>' +
+      allRegionMap(usable, scale) + '</div>' +
+    '<div class="list-title">All D1 to worker region tests</div>' +
+    '<div class="bars">' + bars + '</div>';
+}
+
+function metricScale() {
+  const allVals = MODEL.pairs.map(metricVal).filter(v => v != null);
+  const gMin = allVals.length ? Math.min.apply(null, allVals) : 0;
+  const gMax = allVals.length ? Math.max.apply(null, allVals) : 1;
+  const sortedAll = allVals.slice().sort((a, b) => a - b);
+  const q1 = quantile(sortedAll, 0.25), q3 = quantile(sortedAll, 0.75);
+  const cap = q3 + 1.5 * (q3 - q1);
+  const scaleMax = Math.max(gMin + 1, Math.min(gMax, cap));
+  return { gMin: gMin, scaleMax: scaleMax, span: (scaleMax - gMin) || 1 };
+}
+
+function pairBars(pairs, winner, includeDb, scale) {
+  let bars = "";
+  for (const p of pairs) {
+    const v = metricVal(p);
+    const over = v > scale.scaleMax;
+    const w = over ? 100 : Math.max(2, (v / scale.scaleMax) * 100);
+    const t = Math.min(1, (v - scale.gMin) / scale.span);
+    const col = lerpColor(t);
+    const isBest = p === winner;
+    const name = includeDb ? dbLabel(p.dbKey) + " → " + p.placement : p.placement;
+    const fillStyle = over ? 'width:100%' : 'width:' + w + '%;background:' + col;
+    const fillInner = over ? '<span class="over-label">off scale &#8250;&#8250;</span>' : '';
+    bars += '<div class="barrow ' + (isBest ? "best" : "") + '">' +
+      '<div class="name" title="' + esc(name) + '">' + esc(name) + '</div>' +
+      '<div class="track"><div class="fill' + (over ? " over" : "") + '" style="' + fillStyle + '"' +
+        (over ? ' title="off scale (above ' + fmt(scale.scaleMax) + ')"' : '') + '>' + fillInner + '</div></div>' +
+      '<div class="val' + (over ? " over-val" : "") + '"><span class="num">' + fmtNum(v) + '</span><span class="u">ms</span></div>' +
+    '</div>';
+  }
+  return bars;
+}
+
 // World map for one D1: the region marker plus an arc to every worker placement.
-function regionMap(d, ranked, gMin, scaleMax, span) {
+function regionMap(d, ranked, scale) {
   const B = MODEL.basemap;
   if (!B) return '<div class="empty">No basemap available.</div>';
   const W = B.w, H = B.h;
@@ -1756,8 +1786,8 @@ function regionMap(d, ranked, gMin, scaleMax, span) {
     if (!c) continue;
     const pt = projXY(c[0], c[1], W, H);
     const v = metricVal(p);
-    const over = v > scaleMax;
-    const col = over ? "#e5534b" : lerpColor(Math.min(1, (v - gMin) / span));
+    const over = v > scale.scaleMax;
+    const col = over ? "#e5534b" : lerpColor(Math.min(1, (v - scale.gMin) / scale.span));
     arcs += '<path class="marc" d="' + arcPath(d1pt, pt) + '" stroke="' + col + '"></path>';
     dots += '<circle class="mw" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) +
       '" r="7" fill="' + col + '" data-ms="' + fmtNum(v) + '" data-loc="' + esc(p.placement) + '"></circle>';
@@ -1767,6 +1797,59 @@ function regionMap(d, ranked, gMin, scaleMax, span) {
     '<title>D1 ' + esc(dbLabel(d.key)) + '</title></circle>';
   return '<svg class="regionmap" viewBox="' + vb + '" preserveAspectRatio="xMidYMid meet">' +
     '<g>' + land + '</g>' + arcs + dots + '</svg>';
+}
+
+// World map for all D1 regions: every D1 marker plus every D1-to-Worker line.
+function allRegionMap(pairs, scale) {
+  const B = MODEL.basemap;
+  if (!B) return '<div class="empty">No basemap available.</div>';
+  const W = B.w, H = B.h;
+  let land = "";
+  for (const path of B.paths) land += '<path class="mland" d="' + path + '"/>';
+  const yTop = (90 - 80) / 180 * H, yBot = (90 + 58) / 180 * H;
+  const vb = "0 " + yTop.toFixed(1) + " " + W + " " + (yBot - yTop).toFixed(1);
+  let arcs = "", dots = "", d1s = "";
+  const byPlacement = {};
+  for (const p of pairs) {
+    const d1ll = (MODEL.d1coords || {})[(p.dbKey || "").toLowerCase()];
+    const c = placeCoord(p.placement);
+    if (!d1ll || !c) continue;
+    const d1pt = projXY(d1ll[0], d1ll[1], W, H);
+    const pt = projXY(c[0], c[1], W, H);
+    const v = metricVal(p);
+    const over = v > scale.scaleMax;
+    const col = over ? "#e5534b" : lerpColor(Math.min(1, (v - scale.gMin) / scale.span));
+    arcs += '<path class="marc" d="' + arcPath(d1pt, pt) + '" stroke="' + col + '"></path>';
+    if (!byPlacement[p.placement]) {
+      byPlacement[p.placement] = { placement: p.placement, pt: pt, values: [] };
+    }
+    byPlacement[p.placement].values.push({ db: dbLabel(p.dbKey), placement: p.placement, value: v });
+  }
+  for (const entry of Object.values(byPlacement)) {
+    entry.values.sort((a, b) => a.value - b.value);
+    const avg = entry.values.reduce((sum, item) => sum + item.value, 0) / entry.values.length;
+    const over = avg > scale.scaleMax;
+    const col = over ? "#e5534b" : lerpColor(Math.min(1, (avg - scale.gMin) / scale.span));
+    const tipRows = entry.values.map(item => ({
+      db: item.db,
+      value: fmtNum(item.value),
+    }));
+    dots += '<circle class="mw" cx="' + entry.pt[0].toFixed(1) + '" cy="' + entry.pt[1].toFixed(1) +
+      '" r="6.5" fill="' + col + '" data-region="' + esc(entry.placement) + '" data-list="' +
+      esc(JSON.stringify(tipRows)) + '"></circle>';
+  }
+  for (const d of MODEL.databases) {
+    const d1ll = (MODEL.d1coords || {})[(d.key || "").toLowerCase()];
+    if (!d1ll) continue;
+    const pt = projXY(d1ll[0], d1ll[1], W, H);
+    d1s += '<circle class="md1halo" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="20"></circle>' +
+      '<circle class="md1" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="9">' +
+      '<title>D1 ' + esc(dbLabel(d.key)) + '</title></circle>' +
+      '<text class="md1label" x="' + (pt[0] + 14).toFixed(1) + '" y="' + (pt[1] - 12).toFixed(1) + '">' +
+      esc(dbLabel(d.key)) + '</text>';
+  }
+  return '<svg class="regionmap" viewBox="' + vb + '" preserveAspectRatio="xMidYMid meet">' +
+    '<g>' + land + '</g>' + arcs + dots + d1s + '</svg>';
 }
 
 function wire() {
@@ -1782,14 +1865,30 @@ function wire() {
     map.addEventListener("mousemove", (e) => {
       const t = e.target;
       if (t && t.classList && t.classList.contains("mw")) {
-        msEl.innerHTML = t.getAttribute("data-ms") + '<span class="u">ms</span>';
-        locEl.textContent = t.getAttribute("data-loc");
+        const list = t.getAttribute("data-list");
+        if (list) {
+          let rows = [];
+          try { rows = JSON.parse(list); } catch (error) {}
+          msEl.textContent = t.getAttribute("data-region") || "Worker region";
+          locEl.innerHTML = '<div class="maptip-list">' + rows.map(row =>
+            '<div class="maptip-row">' +
+              '<span class="maptip-d1">' + esc(row.db) + '</span>' +
+              '<span class="maptip-value">' + esc(row.value) + '<span class="u">ms</span></span>' +
+            '</div>'
+          ).join("") + '</div>';
+        } else {
+          msEl.innerHTML = t.getAttribute("data-ms") + '<span class="u">ms</span>';
+          locEl.textContent = t.getAttribute("data-loc");
+        }
         tip.hidden = false;
         const w = tip.offsetWidth || 120;
+        const h = tip.offsetHeight || 80;
         let x = e.clientX + 14;
         if (x + w > window.innerWidth - 8) x = e.clientX - 14 - w;
+        let y = e.clientY + 16;
+        if (y + h > window.innerHeight - 8) y = e.clientY - 16 - h;
         tip.style.left = x + "px";
-        tip.style.top = (e.clientY + 16) + "px";
+        tip.style.top = Math.max(8, y) + "px";
       } else {
         tip.hidden = true;
       }
@@ -1798,7 +1897,13 @@ function wire() {
   }
   // Clicking a map card selects that D1 region for the stats below.
   document.querySelectorAll(".v12card[data-db]").forEach(c => {
-    const pick = () => { state.db = c.getAttribute("data-db"); state.sort = "metric"; state.dir = 1; render(); };
+    const pick = () => {
+      const db = c.getAttribute("data-db");
+      state.db = state.db === db ? "all" : db;
+      state.sort = "metric";
+      state.dir = 1;
+      render();
+    };
     c.onclick = pick;
     c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } };
   });
