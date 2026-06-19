@@ -1,0 +1,32 @@
+{
+  "wnam": [
+    37.77,
+    -122.42,
+    "Western North America"
+  ],
+  "enam": [
+    39.04,
+    -77.49,
+    "Eastern North America"
+  ],
+  "weur": [
+    51.51,
+    -0.13,
+    "Western Europe"
+  ],
+  "eeur": [
+    52.23,
+    21.01,
+    "Eastern Europe"
+  ],
+  "apac": [
+    1.35,
+    103.82,
+    "Asia-Pacific"
+  ],
+  "oc": [
+    -33.87,
+    151.21,
+    "Oceania"
+  ]
+}

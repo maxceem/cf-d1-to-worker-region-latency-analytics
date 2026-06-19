@@ -1,0 +1,663 @@
+{
+  "aws": {
+    "af-south-1": [
+      -33.92,
+      18.42,
+      "Cape Town"
+    ],
+    "ap-east-1": [
+      22.32,
+      114.17,
+      "Hong Kong"
+    ],
+    "ap-east-2": [
+      25.03,
+      121.57,
+      "Taipei"
+    ],
+    "ap-northeast-1": [
+      35.69,
+      139.69,
+      "Tokyo"
+    ],
+    "ap-northeast-2": [
+      37.57,
+      126.98,
+      "Seoul"
+    ],
+    "ap-northeast-3": [
+      34.69,
+      135.5,
+      "Osaka"
+    ],
+    "ap-south-1": [
+      19.08,
+      72.88,
+      "Mumbai"
+    ],
+    "ap-south-2": [
+      17.39,
+      78.49,
+      "Hyderabad"
+    ],
+    "ap-southeast-1": [
+      1.35,
+      103.82,
+      "Singapore"
+    ],
+    "ap-southeast-2": [
+      -33.87,
+      151.21,
+      "Sydney"
+    ],
+    "ap-southeast-3": [
+      -6.21,
+      106.85,
+      "Jakarta"
+    ],
+    "ap-southeast-4": [
+      -37.81,
+      144.96,
+      "Melbourne"
+    ],
+    "ap-southeast-5": [
+      3.14,
+      101.69,
+      "Kuala Lumpur"
+    ],
+    "ap-southeast-6": [
+      -36.85,
+      174.76,
+      "Auckland"
+    ],
+    "ap-southeast-7": [
+      13.76,
+      100.5,
+      "Bangkok"
+    ],
+    "ca-central-1": [
+      45.5,
+      -73.57,
+      "Montreal"
+    ],
+    "ca-west-1": [
+      51.04,
+      -114.07,
+      "Calgary"
+    ],
+    "eu-central-1": [
+      50.11,
+      8.68,
+      "Frankfurt"
+    ],
+    "eu-central-2": [
+      47.37,
+      8.54,
+      "Zurich"
+    ],
+    "eu-north-1": [
+      59.33,
+      18.07,
+      "Stockholm"
+    ],
+    "eu-south-1": [
+      45.46,
+      9.19,
+      "Milan"
+    ],
+    "eu-south-2": [
+      41.65,
+      -0.89,
+      "Aragon (Zaragoza)"
+    ],
+    "eu-west-1": [
+      53.35,
+      -6.26,
+      "Dublin"
+    ],
+    "eu-west-2": [
+      51.51,
+      -0.13,
+      "London"
+    ],
+    "eu-west-3": [
+      48.86,
+      2.35,
+      "Paris"
+    ],
+    "il-central-1": [
+      32.09,
+      34.78,
+      "Tel Aviv"
+    ],
+    "me-central-1": [
+      25.2,
+      55.27,
+      "UAE (Dubai)"
+    ],
+    "me-south-1": [
+      26.07,
+      50.55,
+      "Bahrain"
+    ],
+    "mx-central-1": [
+      20.59,
+      -100.39,
+      "Queretaro"
+    ],
+    "sa-east-1": [
+      -23.55,
+      -46.63,
+      "Sao Paulo"
+    ],
+    "us-east-1": [
+      38.95,
+      -77.45,
+      "N. Virginia"
+    ],
+    "us-east-2": [
+      40,
+      -83,
+      "Ohio"
+    ],
+    "us-west-1": [
+      37.35,
+      -121.96,
+      "N. California"
+    ],
+    "us-west-2": [
+      45.87,
+      -119.69,
+      "Oregon"
+    ]
+  },
+  "gcp": {
+    "africa-south1": [
+      -26.2,
+      28.05,
+      "Johannesburg"
+    ],
+    "asia-east1": [
+      24.05,
+      120.52,
+      "Changhua, Taiwan"
+    ],
+    "asia-east2": [
+      22.32,
+      114.17,
+      "Hong Kong"
+    ],
+    "asia-northeast1": [
+      35.69,
+      139.69,
+      "Tokyo"
+    ],
+    "asia-northeast2": [
+      34.69,
+      135.5,
+      "Osaka"
+    ],
+    "asia-northeast3": [
+      37.57,
+      126.98,
+      "Seoul"
+    ],
+    "asia-south1": [
+      19.08,
+      72.88,
+      "Mumbai"
+    ],
+    "asia-south2": [
+      28.61,
+      77.21,
+      "Delhi"
+    ],
+    "asia-southeast1": [
+      1.35,
+      103.82,
+      "Singapore"
+    ],
+    "asia-southeast2": [
+      -6.21,
+      106.85,
+      "Jakarta"
+    ],
+    "australia-southeast1": [
+      -33.87,
+      151.21,
+      "Sydney"
+    ],
+    "australia-southeast2": [
+      -37.81,
+      144.96,
+      "Melbourne"
+    ],
+    "europe-central2": [
+      52.23,
+      21.01,
+      "Warsaw"
+    ],
+    "europe-north1": [
+      60.57,
+      27.19,
+      "Hamina, Finland"
+    ],
+    "europe-north2": [
+      59.33,
+      18.07,
+      "Stockholm"
+    ],
+    "europe-southwest1": [
+      40.42,
+      -3.7,
+      "Madrid"
+    ],
+    "europe-west1": [
+      50.47,
+      3.82,
+      "St. Ghislain, Belgium"
+    ],
+    "europe-west10": [
+      52.52,
+      13.4,
+      "Berlin"
+    ],
+    "europe-west12": [
+      45.07,
+      7.69,
+      "Turin"
+    ],
+    "europe-west2": [
+      51.51,
+      -0.13,
+      "London"
+    ],
+    "europe-west3": [
+      50.11,
+      8.68,
+      "Frankfurt"
+    ],
+    "europe-west4": [
+      53.43,
+      6.83,
+      "Eemshaven, Netherlands"
+    ],
+    "europe-west6": [
+      47.37,
+      8.54,
+      "Zurich"
+    ],
+    "europe-west8": [
+      45.46,
+      9.19,
+      "Milan"
+    ],
+    "europe-west9": [
+      48.86,
+      2.35,
+      "Paris"
+    ],
+    "me-central1": [
+      25.29,
+      51.53,
+      "Doha"
+    ],
+    "me-central2": [
+      26.43,
+      50.1,
+      "Dammam, Saudi Arabia"
+    ],
+    "me-west1": [
+      32.09,
+      34.78,
+      "Tel Aviv"
+    ],
+    "northamerica-northeast1": [
+      45.5,
+      -73.57,
+      "Montreal"
+    ],
+    "northamerica-northeast2": [
+      43.65,
+      -79.38,
+      "Toronto"
+    ],
+    "northamerica-south1": [
+      20.59,
+      -100.39,
+      "Queretaro"
+    ],
+    "southamerica-east1": [
+      -23.55,
+      -46.63,
+      "Sao Paulo"
+    ],
+    "southamerica-west1": [
+      -33.45,
+      -70.67,
+      "Santiago"
+    ],
+    "us-central1": [
+      41.26,
+      -95.86,
+      "Council Bluffs, Iowa"
+    ],
+    "us-east1": [
+      33.2,
+      -79.99,
+      "Moncks Corner, S. Carolina"
+    ],
+    "us-east4": [
+      39.02,
+      -77.46,
+      "Ashburn, Virginia"
+    ],
+    "us-east5": [
+      39.96,
+      -83,
+      "Columbus, Ohio"
+    ],
+    "us-south1": [
+      32.78,
+      -96.8,
+      "Dallas"
+    ],
+    "us-west1": [
+      45.6,
+      -121.18,
+      "The Dalles, Oregon"
+    ],
+    "us-west2": [
+      34.05,
+      -118.24,
+      "Los Angeles"
+    ],
+    "us-west3": [
+      40.76,
+      -111.89,
+      "Salt Lake City"
+    ],
+    "us-west4": [
+      36.17,
+      -115.14,
+      "Las Vegas"
+    ]
+  },
+  "azure": {
+    "australiacentral": [
+      -35.28,
+      149.13,
+      "Canberra"
+    ],
+    "australiacentral2": [
+      -35.28,
+      149.13,
+      "Canberra"
+    ],
+    "australiaeast": [
+      -33.87,
+      151.21,
+      "Sydney"
+    ],
+    "australiasoutheast": [
+      -37.81,
+      144.96,
+      "Melbourne"
+    ],
+    "austriaeast": [
+      48.21,
+      16.37,
+      "Vienna"
+    ],
+    "belgiumcentral": [
+      50.85,
+      4.35,
+      "Brussels"
+    ],
+    "brazilsouth": [
+      -23.55,
+      -46.63,
+      "Sao Paulo"
+    ],
+    "brazilsoutheast": [
+      -22.91,
+      -43.17,
+      "Rio de Janeiro"
+    ],
+    "canadacentral": [
+      43.65,
+      -79.38,
+      "Toronto"
+    ],
+    "canadaeast": [
+      46.81,
+      -71.21,
+      "Quebec City"
+    ],
+    "centralindia": [
+      18.52,
+      73.86,
+      "Pune"
+    ],
+    "centralus": [
+      41.59,
+      -93.62,
+      "Iowa"
+    ],
+    "chilecentral": [
+      -33.45,
+      -70.67,
+      "Santiago"
+    ],
+    "eastasia": [
+      22.32,
+      114.17,
+      "Hong Kong"
+    ],
+    "eastus": [
+      37.37,
+      -79.82,
+      "Virginia"
+    ],
+    "eastus2": [
+      36.67,
+      -78.39,
+      "Virginia"
+    ],
+    "francecentral": [
+      48.86,
+      2.35,
+      "Paris"
+    ],
+    "francesouth": [
+      43.3,
+      5.37,
+      "Marseille"
+    ],
+    "germanynorth": [
+      52.52,
+      13.4,
+      "Berlin"
+    ],
+    "germanywestcentral": [
+      50.11,
+      8.68,
+      "Frankfurt"
+    ],
+    "indonesiacentral": [
+      -6.21,
+      106.85,
+      "Jakarta"
+    ],
+    "israelcentral": [
+      32.09,
+      34.78,
+      "Israel (Tel Aviv)"
+    ],
+    "italynorth": [
+      45.46,
+      9.19,
+      "Milan"
+    ],
+    "japaneast": [
+      35.69,
+      139.69,
+      "Tokyo"
+    ],
+    "japanwest": [
+      34.69,
+      135.5,
+      "Osaka"
+    ],
+    "koreacentral": [
+      37.57,
+      126.98,
+      "Seoul"
+    ],
+    "koreasouth": [
+      35.18,
+      129.08,
+      "Busan"
+    ],
+    "malaysiawest": [
+      3.14,
+      101.69,
+      "Kuala Lumpur"
+    ],
+    "mexicocentral": [
+      20.59,
+      -100.39,
+      "Queretaro"
+    ],
+    "newzealandnorth": [
+      -36.85,
+      174.76,
+      "Auckland"
+    ],
+    "northcentralus": [
+      41.88,
+      -87.63,
+      "Illinois (Chicago)"
+    ],
+    "northeurope": [
+      53.35,
+      -6.26,
+      "Ireland (Dublin)"
+    ],
+    "norwayeast": [
+      59.91,
+      10.75,
+      "Oslo"
+    ],
+    "norwaywest": [
+      58.97,
+      5.73,
+      "Stavanger"
+    ],
+    "polandcentral": [
+      52.23,
+      21.01,
+      "Warsaw"
+    ],
+    "qatarcentral": [
+      25.29,
+      51.53,
+      "Doha"
+    ],
+    "southafricanorth": [
+      -26.2,
+      28.05,
+      "Johannesburg"
+    ],
+    "southafricawest": [
+      -33.92,
+      18.42,
+      "Cape Town"
+    ],
+    "southcentralus": [
+      29.42,
+      -98.49,
+      "Texas (San Antonio)"
+    ],
+    "southeastasia": [
+      1.35,
+      103.82,
+      "Singapore"
+    ],
+    "southindia": [
+      13.08,
+      80.27,
+      "Chennai"
+    ],
+    "spaincentral": [
+      40.42,
+      -3.7,
+      "Madrid"
+    ],
+    "swedencentral": [
+      60.67,
+      17.14,
+      "Gavle"
+    ],
+    "switzerlandnorth": [
+      47.37,
+      8.54,
+      "Zurich"
+    ],
+    "switzerlandwest": [
+      46.2,
+      6.14,
+      "Geneva"
+    ],
+    "uaecentral": [
+      24.45,
+      54.38,
+      "Abu Dhabi"
+    ],
+    "uaenorth": [
+      25.2,
+      55.27,
+      "Dubai"
+    ],
+    "uksouth": [
+      51.51,
+      -0.13,
+      "London"
+    ],
+    "ukwest": [
+      51.48,
+      -3.18,
+      "Cardiff"
+    ],
+    "westcentralus": [
+      41.14,
+      -104.82,
+      "Wyoming (Cheyenne)"
+    ],
+    "westeurope": [
+      52.37,
+      4.9,
+      "Netherlands (Amsterdam)"
+    ],
+    "westindia": [
+      19.08,
+      72.88,
+      "Mumbai"
+    ],
+    "westus": [
+      37.78,
+      -122.42,
+      "California (San Francisco)"
+    ],
+    "westus2": [
+      47.23,
+      -119.85,
+      "Washington (Quincy)"
+    ],
+    "westus3": [
+      33.45,
+      -112.07,
+      "Phoenix"
+    ]
+  }
+}
