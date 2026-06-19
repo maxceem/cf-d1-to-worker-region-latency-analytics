@@ -243,6 +243,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") args.help = true;
+    else if (arg === "--dry-run") args.dryRun = true;
     else if (arg === "--run-id") args.runId = requireValue(argv, ++i, arg);
     else if (arg === "--account-id") args.accountId = requireValue(argv, ++i, arg);
     else throw new Error(`Unknown argument: ${arg}`);
@@ -261,12 +262,15 @@ function requireValue(argv, index, flag) {
 function printHelp() {
   console.log(`Usage:
   npm run cleanup
+  npm run cleanup -- --dry-run
   npm run cleanup -- --run-id <run-id>
   npm run cleanup -- --account-id <account-id>
 
 Deletes all resources still tracked in .benchmark-resources/resources.json.
 Entries are removed from the tracker only after deletion succeeds or Cloudflare
 confirms the resource no longer exists.
+
+Use --dry-run to print the matching tracked resources without deleting them.
 `);
 }
 
@@ -287,6 +291,12 @@ async function main() {
     return;
   }
 
+  if (args.dryRun) {
+    console.log(`Tracked benchmark resources matching filters: ${resources.length}`);
+    printResources(resources);
+    return;
+  }
+
   console.log(`Cleaning ${resources.length} tracked benchmark resources...`);
   const result = await cleanupTrackedResources({
     runId: args.runId,
@@ -295,6 +305,17 @@ async function main() {
   console.log(`Cleanup complete. Remaining tracked resources: ${result.remaining}`);
   if (result.remaining > 0) {
     process.exitCode = 1;
+  }
+}
+
+function printResources(resources) {
+  const rows = resources
+    .slice()
+    .sort((a, b) => a.type.localeCompare(b.type) || a.runId.localeCompare(b.runId) || a.name.localeCompare(b.name));
+  for (const resource of rows) {
+    const id = resource.id ? ` id=${resource.id}` : "";
+    const url = resource.url ? ` url=${resource.url}` : "";
+    console.log(`${resource.type} ${resource.name} run=${resource.runId} account=${resource.accountId}${id}${url}`);
   }
 }
 

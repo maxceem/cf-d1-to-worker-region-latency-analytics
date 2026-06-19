@@ -53,6 +53,12 @@ Temporary resources are deleted after a normal run. If a run is interrupted and 
 npm run cleanup
 ```
 
+Preview tracked resources without deleting them:
+
+```bash
+npm run cleanup -- --dry-run
+```
+
 ## License
 
 MIT
