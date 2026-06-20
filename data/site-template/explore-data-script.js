@@ -8,12 +8,11 @@ const state = {
   metric: "p95",
   sort: "index",
   dir: 1,
+  expandedProviders: [],
 };
 let rawClusterize = null;
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function fmt(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0) + "ms"; }
-function fmtNum(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
 function fmtMsValue(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
 function labelValue(v) { return v == null || v === "" ? "(none)" : String(v); }
 function dbLabel(key) {
@@ -53,14 +52,26 @@ function countCategory(rows, key) {
     return acc;
   }, {});
 }
-function countsText(key, counts) {
-  const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  if (!entries.length) return "—";
-  return entries.map(([k, v]) =>
-    '<button class="raw-chip' + (hasSelectedValue(key, k) ? " active" : "") + '" type="button" data-pill-filter="' + esc(key) + '" data-pill-value="' + esc(k) + '">' +
-      '<b>' + esc(filterText(key, k)) + '</b>' + v +
-    '</button>'
-  ).join("");
+function sortedCounts(counts) {
+  return Object.entries(counts || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+function pillHtml(key, value, count) {
+  return '<button class="raw-pill' + (hasSelectedValue(key, value) ? " active" : "") + '" type="button" data-pill-filter="' + esc(key) + '" data-pill-value="' + esc(value) + '">' +
+    '<span>' + esc(filterText(key, value)) + '</span><span class="c">' + count.toLocaleString() + '</span></button>';
+}
+function runStamp() {
+  const r = MODEL.run || {};
+  const start = new Date(r.startedAt || r.completedAt);
+  if (isNaN(start)) {
+    return '<div class="raw-run">' + esc(r.id || "") + '</div>';
+  }
+  const dateOpts = { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" };
+  const timeOpts = { timeZone: "UTC", hour: "2-digit", minute: "2-digit", hour12: false };
+  const date = start.toLocaleDateString("en-US", dateOpts);
+  let time = start.toLocaleTimeString("en-US", timeOpts);
+  const end = new Date(r.completedAt);
+  if (!isNaN(end)) time += "–" + end.toLocaleTimeString("en-US", timeOpts);
+  return '<div class="raw-run">Measured ' + esc(date) + ' · ' + esc(time) + ' UTC</div>';
 }
 function render() {
   if (rawClusterize && typeof rawClusterize.destroy === "function") {
@@ -70,11 +81,9 @@ function render() {
   const app = document.getElementById("app");
   app.innerHTML =
     '<section class="raw-head">' +
-      '<div>' +
-        '<h1>Raw Request Explorer</h1>' +
-        '<p class="sub">Inspect every measured query, including D1 serving location, Worker reported colo, and the placement header returned by Cloudflare.</p>' +
-      '</div>' +
-      '<div class="raw-run">' + esc(MODEL.run.id || "run") + '</div>' +
+      '<h1>Explore Data</h1>' +
+      runStamp() +
+      '<p class="sub">Inspect every measured query, including D1 serving location, Worker reported colo, and the placement header returned by Cloudflare.</p>' +
     '</section>' +
     filtersPanel() +
     rawTable();
@@ -82,95 +91,82 @@ function render() {
   renderRawRows();
 }
 
+const FILTER_ORDER = ["db", "placement", "placementColo", "workerColo", "d1Region", "d1Colo", "note"];
+const PROVIDER_FACETS = { placement: true };
+const PROV_LABEL = { aws: "AWS", gcp: "GCP", azure: "Azure" };
+const PROV_ORDER = ["aws", "gcp", "azure"];
+const CHEV = '<svg class="chev" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
 function filtersPanel() {
   return '<section class="raw-filters">' +
-    (anySelected() ? '<div class="raw-filter-actions"><button class="raw-clear" type="button" data-clear-filters>Clear filters</button></div>' : "") +
-    rowModeSwitch() +
-    queryPositionSwitch() +
-    metricSwitch() +
-    statsPanel() +
+    modeBar() +
+    '<div class="raw-frows">' + FILTER_ORDER.map(filterRow).join("") + '</div>' +
+    statRibbon() +
   '</section>';
 }
 
-function rowModeSwitch() {
-  const options = [
-    ["request", "Requests"],
-    ["query", "Queries"],
-    ["pair", "Worker target"],
-  ];
-  return '<div class="raw-mode-row">' +
-    '<span>Rows</span>' +
-    '<div class="raw-mode" role="group" aria-label="Rows">' +
-      options.map(([value, label]) =>
-        '<button class="raw-mode-button' + (state.rowMode === value ? " active" : "") + '" type="button" data-row-mode="' + value + '">' + label + '</button>'
+function modeBar() {
+  const seg = (label, attr, options, current) =>
+    '<div class="raw-seg"><span>' + label + '</span><div class="raw-segset" role="group" aria-label="' + label + '">' +
+      options.map(([value, lbl]) =>
+        '<button class="raw-segbtn' + (current === value ? " active" : "") + '" type="button" ' + attr + '="' + value + '">' + lbl + '</button>'
       ).join("") +
+    '</div></div>';
+  return '<div class="raw-bar"><div class="raw-bar-modes">' +
+    seg("Rows", "data-row-mode", [["request", "Requests"], ["query", "Queries"], ["pair", "Worker target"]], state.rowMode) +
+    seg("Query position", "data-query-position", [["all", "All"], ["first", "First"], ["later", "Later"]], state.queryPosition) +
+    seg("Metric", "data-raw-metric", METRICS, state.metric) +
     '</div>' +
+    (anySelected() ? '<button class="raw-clear" type="button" data-clear-filters>Clear filters</button>' : "") +
   '</div>';
-}
-
-function queryPositionSwitch() {
-  const options = [
-    ["all", "All"],
-    ["first", "First"],
-    ["later", "Later"],
-  ];
-  return '<div class="raw-mode-row">' +
-    '<span>Query position</span>' +
-    '<div class="raw-mode" role="group" aria-label="Query position">' +
-      options.map(([value, label]) =>
-        '<button class="raw-mode-button' + (state.queryPosition === value ? " active" : "") + '" type="button" data-query-position="' + value + '">' + label + '</button>'
-      ).join("") +
-    '</div>' +
-  '</div>';
-}
-
-function metricSwitch() {
-  return '<div class="raw-mode-row">' +
-    '<span>Metric</span>' +
-    '<div class="raw-mode" role="group" aria-label="Metric">' +
-      METRICS.map(([value, label]) =>
-        '<button class="raw-mode-button' + (state.metric === value ? " active" : "") + '" type="button" data-raw-metric="' + value + '">' + label + '</button>'
-      ).join("") +
-    '</div>' +
-  '</div>';
-}
-
-function statsPanel() {
-  const rows = filteredRows();
-  const totalRows = displayRows();
-  const values = rows.map(r => r.networkMs);
-  const stats = window.MetricStats.metricStats(values);
-  const ok = rows.filter(r => r.status === "ok").length;
-  const failed = rows.filter(r => r.status === "failed").length;
-  const quantityStats =
-    statCard("Visible", rows.length.toLocaleString() + " / " + totalRows.length.toLocaleString()) +
-    statCard("Successful", ok.toLocaleString()) +
-    statCard("Failed", failed.toLocaleString()) +
-    statCard("Queries", rows.reduce((sum, row) => sum + (row.measuredQueryCount || 0), 0).toLocaleString());
-  return '<div class="raw-insights">' +
-    filterRow("db") +
-    filterRow("placement") +
-    filterRow("placementColo") +
-    filterRow("workerColo") +
-    filterRow("d1Region") +
-    filterRow("d1Colo") +
-    filterRow("note") +
-    '<div class="raw-metric-row quantity">' +
-      quantityStats +
-    '</div>' +
-    '<div class="raw-metric-row latency">' +
-      METRICS.map(([key, label]) => statCard(label, fmt(stats[key]))).join("") +
-    '</div>' +
-  '</div>';
-}
-
-function statCard(label, value) {
-  return '<div class="raw-stat"><span>' + esc(label) + '</span><b>' + esc(value) + '</b></div>';
 }
 
 function filterRow(key) {
-  const rows = filteredRows(key);
-  return '<div class="raw-dist"><span>' + esc(FILTERS[key].label) + '</span><div>' + countsText(key, countCategory(rows, key)) + '</div></div>';
+  const counts = countCategory(filteredRows(key), key);
+  const label = '<span class="raw-flab">' + esc(FILTERS[key].label) + '</span>';
+  const body = PROVIDER_FACETS[key]
+    ? providerPills(key, counts)
+    : (sortedCounts(counts).map(([v, c]) => pillHtml(key, v, c)).join("") || '<span class="muted">—</span>');
+  return '<div class="raw-frow">' + label + '<div class="raw-fpills">' + body + '</div></div>';
+}
+
+function providerPills(key, counts) {
+  const groups = {};
+  for (const [value, count] of sortedCounts(counts)) (groups[value.split(":")[0]] ||= []).push([value, count]);
+  const provs = PROV_ORDER.filter(p => groups[p]).concat(Object.keys(groups).filter(p => !PROV_ORDER.includes(p)).sort());
+  if (!provs.length) return '<span class="muted">—</span>';
+  const pills = provs.map(p => {
+    const open = state.expandedProviders.includes(p);
+    const total = groups[p].reduce((sum, [, c]) => sum + c, 0);
+    return '<button class="raw-pill raw-prov' + (open ? " open" : "") + '" type="button" data-prov-toggle="' + esc(p) + '" aria-expanded="' + open + '">' +
+      CHEV + '<span>' + esc(PROV_LABEL[p] || p) + '</span><span class="c">' + total.toLocaleString() + '</span></button>';
+  }).join("");
+  const subs = provs.map(p =>
+    '<div class="raw-sub" data-prov="' + esc(p) + '"' + (state.expandedProviders.includes(p) ? "" : " hidden") + '>' +
+      groups[p].map(([v, c]) => pillHtml(key, v, c)).join("") +
+    '</div>'
+  ).join("");
+  return pills + subs;
+}
+
+function statRibbon() {
+  const rows = filteredRows();
+  const totalRows = displayRows();
+  const stats = window.MetricStats.metricStats(rows.map(r => r.networkMs));
+  const ok = rows.filter(r => r.status === "ok").length;
+  const failed = rows.filter(r => r.status === "failed").length;
+  const fig = (label, value, head) => '<div class="raw-fig' + (head ? " head" : "") + '"><div class="v">' + value + '</div><div class="k">' + esc(label) + '</div></div>';
+  return '<div class="raw-ribbon">' +
+    fig("Visible", esc(rows.length.toLocaleString() + " / " + totalRows.length.toLocaleString())) +
+    fig("Successful", esc(ok.toLocaleString())) +
+    fig("Failed", esc(failed.toLocaleString())) +
+    '<div class="raw-spacer"></div>' +
+    METRICS.map(([key, label], i) => fig(label, fmtUnit(stats[key]), i === 0)).join("") +
+  '</div>';
+}
+
+function fmtUnit(v) {
+  return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0) + '<span class="u">ms</span>';
 }
 
 function rawTable() {
@@ -434,6 +430,15 @@ function wire() {
         ? selected.filter(item => item !== value)
         : selected.concat(value);
       if (!state.filters[key].length) delete state.filters[key];
+      render();
+    };
+  });
+  document.querySelectorAll("[data-prov-toggle]").forEach(button => {
+    button.onclick = () => {
+      const prov = button.getAttribute("data-prov-toggle");
+      const i = state.expandedProviders.indexOf(prov);
+      if (i >= 0) state.expandedProviders.splice(i, 1);
+      else state.expandedProviders.push(prov);
       render();
     };
   });
