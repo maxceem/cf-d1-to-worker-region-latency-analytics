@@ -1006,10 +1006,28 @@ function render() {
   app.innerHTML =
     header() +
     heroExplorations() +
-    regionPanel() +
+    '<div id="region-panel">' + regionPanel() + '</div>' +
     metaFooter() +
     Site.pageFooter(MODEL);
   wire();
+}
+
+function renderRegionPanel() {
+  const panel = document.getElementById("region-panel");
+  if (!panel) {
+    render();
+    return;
+  }
+  panel.innerHTML = regionPanel();
+  wireRegionPanel();
+}
+
+function syncMapCardSelection() {
+  document.querySelectorAll(".v12card[data-db]").forEach(card => {
+    const selected = state.db === card.getAttribute("data-db");
+    card.classList.toggle("sel", selected);
+    card.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
 }
 
 function header() {
@@ -1834,6 +1852,31 @@ function wire() {
   document.querySelectorAll("[data-metric]").forEach(t => {
     t.onclick = () => { state.metric = t.getAttribute("data-metric"); render(); };
   });
+  wireRegionPanel();
+  // Clicking a map card selects that D1 region for the stats below.
+  document.querySelectorAll(".v12card[data-db]").forEach(c => {
+    const pick = () => {
+      const db = c.getAttribute("data-db");
+      state.db = state.db === db ? "all" : db;
+      state.sort = "metric";
+      state.dir = 1;
+      syncMapCardSelection();
+      renderRegionPanel();
+    };
+    c.onclick = pick;
+    c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } };
+  });
+  document.querySelectorAll("th[data-msort]").forEach(th => {
+    th.onclick = () => {
+      const key = th.getAttribute("data-msort");
+      if (state.matrixSort === key) state.matrixDir *= -1;
+      else { state.matrixSort = key; state.matrixDir = 1; }
+      render();
+    };
+  });
+}
+
+function wireRegionPanel() {
   // Custom tooltip for worker dots on the map.
   const map = document.querySelector(".regionmap");
   const tip = document.getElementById("maptip");
@@ -1872,32 +1915,12 @@ function wire() {
     });
     map.addEventListener("mouseleave", () => { tip.hidden = true; });
   }
-  // Clicking a map card selects that D1 region for the stats below.
-  document.querySelectorAll(".v12card[data-db]").forEach(c => {
-    const pick = () => {
-      const db = c.getAttribute("data-db");
-      state.db = state.db === db ? "all" : db;
-      state.sort = "metric";
-      state.dir = 1;
-      render();
-    };
-    c.onclick = pick;
-    c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } };
-  });
   document.querySelectorAll("th[data-sort]").forEach(th => {
     th.onclick = () => {
       const key = th.getAttribute("data-sort");
       if (state.sort === key) state.dir *= -1;
       else { state.sort = key; state.dir = 1; }
-      render();
-    };
-  });
-  document.querySelectorAll("th[data-msort]").forEach(th => {
-    th.onclick = () => {
-      const key = th.getAttribute("data-msort");
-      if (state.matrixSort === key) state.matrixDir *= -1;
-      else { state.matrixSort = key; state.matrixDir = 1; }
-      render();
+      renderRegionPanel();
     };
   });
 }
