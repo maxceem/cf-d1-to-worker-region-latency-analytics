@@ -497,9 +497,29 @@ a:hover { text-decoration: underline; }
 .raw-table-head { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
 .raw-table-head h2 { margin-top: 0; }
 .raw-table-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.raw-loading {
+  position: absolute; z-index: 1; inset: 42px 0 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.raw-load-text { width: min(300px, 72vw); }
+.raw-load-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.raw-load-title { color: var(--text); font-size: 13px; font-weight: 800; line-height: 1.2; }
+.raw-load-percent { color: var(--text); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.raw-load-status { color: var(--muted); font-size: 12px; line-height: 1.3; margin-top: 2px; }
+.raw-load-track {
+  position: relative; height: 4px; margin-top: 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+}
+.raw-load-bar {
+  height: 100%; border-radius: inherit; background: var(--accent-2);
+}
 .raw-scroll {
+  position: relative;
   border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
-  overflow: auto; max-height: 70vh;
+  overflow: auto; height: min(70vh, 720px); min-height: 430px;
 }
 .raw-table { min-width: 1240px; }
 .raw-table thead th { position: sticky; top: 0; z-index: 2; background: var(--panel); }
@@ -528,6 +548,8 @@ a:hover { text-decoration: underline; }
   .raw-clear { margin-left: 0; }
   .raw-frow { grid-template-columns: 1fr; gap: 5px; }
   .raw-flab { padding-top: 0; }
+  .raw-scroll { height: 62vh; min-height: 340px; }
+  .raw-loading { align-items: flex-start; padding-top: 88px; }
 }
 
 .panel {

@@ -1,5 +1,6 @@
 "use strict";
 const MODEL = JSON.parse(document.getElementById("report-data").textContent);
+const ROW_CHUNKS = Array.from(document.querySelectorAll("[data-report-rows]"));
 const METRICS = window.MetricStats.METRICS.map(metric => [metric.key, metric.label]);
 const state = {
   filters: {},
@@ -10,6 +11,12 @@ const state = {
   expandedProviders: [],
 };
 let rawClusterize = null;
+const dataLoad = {
+  active: ROW_CHUNKS.length > 0,
+  loaded: 0,
+  total: ROW_CHUNKS.length,
+  rows: [],
+};
 const esc = Site.escapeHtml;
 const lerpColor = Site.latencyColor;
 
@@ -120,7 +127,8 @@ function render() {
     rawTable() +
     Site.pageFooter(MODEL);
   wire();
-  renderRawRows();
+  if (dataReady()) renderRawRows();
+  else updateLoadingProgress();
 }
 
 const FILTER_ORDER = ["db", "d1Region", "d1Colo", "placement", "placementColo", "workerColo", "note"];
@@ -153,7 +161,7 @@ function modeBar() {
 }
 
 function filterRow(key) {
-  const counts = countCategory(filteredRows(key), key);
+  const counts = filterCounts(key);
   const label = '<span class="raw-flab">' + esc(FILTERS[key].label) + '</span>';
   const body = PROVIDER_FACETS[key]
     ? providerPills(key, counts)
@@ -181,6 +189,16 @@ function providerPills(key, counts) {
 }
 
 function statRibbon() {
+  if (!dataReady()) {
+    const total = (MODEL.rowCounts && MODEL.rowCounts[state.rowMode]) || 0;
+    const progress = loadPercent();
+    const fig = (label, value, head) => '<div class="raw-fig' + (head ? " head" : "") + '"><div class="v">' + value + '</div><div class="k">' + esc(label) + '</div></div>';
+    return '<div class="raw-ribbon">' +
+      fig("Rows", esc(total.toLocaleString())) +
+      fig("Status", "Loading", true) +
+      fig("Data", progress == null ? "—" : esc(progress + "%")) +
+    '</div>';
+  }
   const rows = filteredRows();
   const totalRows = displayRows();
   const stats = window.MetricStats.metricStats(rows.map(r => r.networkMs));
@@ -219,9 +237,20 @@ function rawTable() {
   ).join("");
   return '<section class="raw-table-panel">' +
     '<div id="rawScroll" class="raw-scroll clusterize-scroll"><table class="raw-table"><thead><tr>' + head + '</tr></thead><tbody id="rawRows" class="clusterize-content">' +
-      '<tr class="clusterize-no-data"><td colspan="' + cols.length + '" class="empty">Loading rows.</td></tr>' +
-    '</tbody></table></div>' +
+      '<tr class="clusterize-no-data raw-loading-row"><td colspan="' + cols.length + '"></td></tr>' +
+    '</tbody></table>' + loadingOverlay() + '</div>' +
   '</section>';
+}
+
+function loadingOverlay() {
+  if (dataReady()) return "";
+  return '<div class="raw-loading" aria-live="polite">' +
+    '<div class="raw-load-text">' +
+      '<div class="raw-load-head"><div class="raw-load-title">Loading rows</div><div class="raw-load-percent">0%</div></div>' +
+      '<div class="raw-load-status">Preparing rows.</div>' +
+      '<div class="raw-load-track"><div class="raw-load-bar" style="width:0%"></div></div>' +
+    '</div>' +
+  '</div>';
 }
 
 function renderRawRows() {
@@ -266,6 +295,7 @@ function rawRowHtml(row, scale) {
 }
 
 function filteredRows(skipKey) {
+  if (!dataReady()) return [];
   return displayRows().filter(row => {
     for (const key of Object.keys(FILTERS)) {
       if (key === skipKey) continue;
@@ -279,6 +309,7 @@ function filteredRows(skipKey) {
 }
 
 function displayRows() {
+  if (!dataReady()) return [];
   if (state.rowMode === "pair") return pairRows();
   const queries = MODEL.rows;
   return state.rowMode === "request" ? requestRows(queries) : queries;
@@ -430,6 +461,48 @@ function queryRangeLabel(indexes) {
 function unique(values) {
   return [...new Set(values.filter(v => v != null && v !== ""))].sort((a, b) => String(a).localeCompare(String(b)));
 }
+function dataReady() {
+  return !dataLoad.active;
+}
+function loadPercent() {
+  if (!dataLoad.total) return null;
+  return Math.round((dataLoad.loaded / dataLoad.total) * 100);
+}
+function filterCounts(key) {
+  if (dataReady()) return countCategory(filteredRows(key), key);
+  return (MODEL.filterFacets && MODEL.filterFacets[state.rowMode] && MODEL.filterFacets[state.rowMode][key]) || {};
+}
+function updateLoadingProgress() {
+  const percent = loadPercent();
+  const status = document.querySelector(".raw-load-status");
+  const bar = document.querySelector(".raw-load-bar");
+  const percentText = document.querySelector(".raw-load-percent");
+  const value = percent == null ? 0 : percent;
+  if (status) {
+    status.textContent = percent == null
+      ? "Preparing rows."
+      : "Loaded " + dataLoad.loaded.toLocaleString() + " of " + dataLoad.total.toLocaleString() + " chunks.";
+  }
+  if (bar) bar.style.width = value + "%";
+  if (percentText) percentText.textContent = value + "%";
+}
+function startDataLoad() {
+  if (!dataLoad.active) return;
+  const loadChunk = () => {
+    const node = ROW_CHUNKS[dataLoad.loaded];
+    if (!node) {
+      MODEL.rows = dataLoad.rows;
+      dataLoad.active = false;
+      render();
+      return;
+    }
+    dataLoad.rows.push(...JSON.parse(node.textContent));
+    dataLoad.loaded += 1;
+    updateLoadingProgress();
+    setTimeout(loadChunk, 0);
+  };
+  requestAnimationFrame(() => setTimeout(loadChunk, 0));
+}
 function wire() {
   document.querySelectorAll("[data-row-mode]").forEach(button => {
     button.onclick = () => {
@@ -483,3 +556,4 @@ function wire() {
 Site.initTheme();
 Site.setAppClass("wrap raw-wrap");
 render();
+startDataLoad();

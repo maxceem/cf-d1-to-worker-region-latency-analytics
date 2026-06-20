@@ -410,6 +410,7 @@ function mergeCounts(objects) {
 // ---------------------------------------------------------------------------
 
 const TEMPLATE_DIR = resolve(rootDir, "data/site-template");
+const ROW_CHUNK_SIZE = 1000;
 
 async function renderHtml(model, { scriptName, title, page }) {
   const [template, siteHeaderTemplate, style, metricStatsScript, commonScript, script, clusterizeScript] = await Promise.all([
@@ -421,7 +422,7 @@ async function renderHtml(model, { scriptName, title, page }) {
     readFile(resolve(TEMPLATE_DIR, scriptName), "utf8"),
     page === "explore-data" ? readFile(resolve(rootDir, "node_modules/clusterize.js/clusterize.min.js"), "utf8") : Promise.resolve(""),
   ]);
-  const dataJson = JSON.stringify(model).replace(/</g, "\\u003c");
+  const dataBlocks = renderDataBlocks(model, page);
   const pageValues = {
     repoUrl: escapeHtmlAttr(REPO_URL),
     overviewHref: page === "overview" ? "#" : "index.html",
@@ -438,11 +439,167 @@ async function renderHtml(model, { scriptName, title, page }) {
 
   return fillTemplate(template, {
     title: escapeHtml(title),
-    dataJson,
+    dataJson: dataBlocks.dataJson,
+    extraDataScripts: dataBlocks.extraDataScripts,
     siteHeader: fillTemplate(siteHeaderTemplate, pageValues),
     script: "\n" + bundledScript + "\n",
     style: "\n" + style.trimEnd() + "\n",
   });
+}
+
+function renderDataBlocks(model, page) {
+  if (page !== "explore-data") {
+    return {
+      dataJson: safeJson(model),
+      extraDataScripts: "",
+    };
+  }
+
+  const rows = model.rows || [];
+  const initialModel = {
+    ...model,
+    rows: [],
+    rowCounts: rawRowCounts(rows),
+    filterFacets: rawFilterFacets(rows),
+  };
+  const scripts = [];
+  for (let i = 0; i < rows.length; i += ROW_CHUNK_SIZE) {
+    scripts.push(
+      '<script type="application/json" data-report-rows>' +
+        safeJson(rows.slice(i, i + ROW_CHUNK_SIZE)) +
+      '</script>'
+    );
+  }
+
+  return {
+    dataJson: safeJson(initialModel),
+    extraDataScripts: scripts.join("\n"),
+  };
+}
+
+function safeJson(value) {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
+function rawRowCounts(rows) {
+  return {
+    pair: rawPairRows(rows).length,
+    request: rawRequestRows(rows).length,
+    query: rows.length,
+  };
+}
+
+function rawFilterFacets(rows) {
+  return {
+    pair: rawFacetCounts(rawPairRows(rows)),
+    request: rawFacetCounts(rawRequestRows(rows)),
+    query: rawFacetCounts(rows),
+  };
+}
+
+function rawFacetCounts(rows) {
+  const result = {};
+  for (const key of ["db", "placement", "placementColo", "workerColo", "d1Region", "d1Colo", "note"]) {
+    result[key] = {};
+  }
+  for (const row of rows) {
+    for (const key of Object.keys(result)) {
+      for (const value of rawFilterValues(row, key)) {
+        result[key][value] = (result[key][value] || 0) + 1;
+      }
+    }
+  }
+  return result;
+}
+
+function rawFilterValues(row, key) {
+  let values = [];
+  if (key === "db") values = [row.dbKey];
+  else if (key === "placement") values = [row.placement];
+  else if (key === "placementColo") values = [row.placementColo];
+  else if (key === "workerColo") values = [row.workerColo];
+  else if (key === "d1Region") values = row.d1RegionValues || [row.d1Region];
+  else if (key === "d1Colo") values = row.d1ColoValues || [row.d1Colo];
+  else if (key === "note") values = rawNoteValues(row);
+  return values.map(rawLabelValue);
+}
+
+function rawLabelValue(value) {
+  return value == null || value === "" ? "(none)" : String(value);
+}
+
+function rawNoteValues(row) {
+  const values = row.noteValues || row.notes || (row.note ? [row.note] : []);
+  return values.length ? values : [null];
+}
+
+function rawPairRows(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = row.dbKey + "|" + row.placement;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  }
+  return [...grouped.values()].map((rowsForPair) => {
+    const first = rowsForPair[0];
+    const requests = rawGroupByRequest(rowsForPair);
+    const requestValues = requests
+      .map(rowsForRequest => MetricStats.reduceMetric(rowsForRequest.map(row => row.networkMs), "p95"))
+      .filter(value => value != null);
+    const placementColoValues = uniqueValues(rowsForPair.map(row => row.placementColo).filter(Boolean));
+    const workerColoValues = uniqueValues(rowsForPair.map(row => row.workerColo).filter(Boolean));
+    const d1RegionValues = uniqueValues(rowsForPair.flatMap(row => row.d1RegionValues || [row.d1Region]).filter(Boolean));
+    const d1ColoValues = uniqueValues(rowsForPair.flatMap(row => row.d1ColoValues || [row.d1Colo]).filter(Boolean));
+    const noteValues = uniqueValues(rowsForPair.flatMap(row => row.notes || (row.note ? [row.note] : [])));
+    return {
+      dbKey: first.dbKey,
+      placement: first.placement,
+      placementColo: placementColoValues.join("+") || null,
+      workerColo: workerColoValues.join("+") || null,
+      d1Region: d1RegionValues.join("+") || null,
+      d1Colo: d1ColoValues.join("+") || null,
+      placementColoValues,
+      workerColoValues,
+      d1RegionValues,
+      d1ColoValues,
+      noteValues,
+      note: noteValues.join(", ") || null,
+      networkMs: MetricStats.reduceMetric(requestValues, "p95"),
+    };
+  });
+}
+
+function rawRequestRows(rows) {
+  return rawGroupByRequest(rows).map((rowsForRequest) => {
+    const first = rowsForRequest[0];
+    const d1RegionValues = uniqueValues(rowsForRequest.map(row => row.d1Region).filter(Boolean));
+    const d1ColoValues = uniqueValues(rowsForRequest.map(row => row.d1Colo).filter(Boolean));
+    const noteValues = uniqueValues(rowsForRequest.flatMap(row => row.notes || (row.note ? [row.note] : [])));
+    return {
+      ...first,
+      d1Region: d1RegionValues.join("+") || null,
+      d1Colo: d1ColoValues.join("+") || null,
+      d1RegionValues,
+      d1ColoValues,
+      note: noteValues.join(", ") || null,
+      noteValues,
+    };
+  });
+}
+
+function rawGroupByRequest(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = row.dbKey + "|" + row.placement + "|" + row.requestIndex;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  }
+  return [...grouped.values()];
+}
+
+function uniqueValues(values) {
+  return [...new Set(values.filter(value => value != null && value !== ""))]
+    .sort((a, b) => String(a).localeCompare(String(b)));
 }
 
 function browserMetricStatsScript(source) {
