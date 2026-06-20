@@ -14,6 +14,38 @@ let rawClusterize = null;
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function fmtMsValue(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
+const OVER_COLOR = "#e5534b";
+function lerpColor(t) {
+  // 0 = fast/green, 1 = slow/red, via amber midpoint (matches the overview page scale).
+  t = Math.max(0, Math.min(1, t));
+  const stops = [[31, 156, 77], [216, 197, 49], [217, 83, 79]];
+  const seg = t < .5 ? 0 : 1;
+  const lt = t < .5 ? t / .5 : (t - .5) / .5;
+  const a = stops[seg], b = stops[seg + 1];
+  return "rgb(" + a.map((x, i) => Math.round(x + (b[i] - x) * lt)).join(",") + ")";
+}
+// Global latency scale over the whole (unfiltered) dataset for the current row mode and
+// metric, so cell colors stay comparable no matter which filters are selected. The upper
+// bound is capped at the Tukey fence (q3 + 1.5·IQR) so a few outliers don't flatten the range.
+function networkScale() {
+  const values = displayRows().map(row => row.networkMs).filter(v => v != null);
+  if (!values.length) return { min: 0, max: 1, span: 1 };
+  const lo = Math.min.apply(null, values);
+  const hi = Math.max.apply(null, values);
+  const q1 = window.MetricStats.percentile(values, 25);
+  const q3 = window.MetricStats.percentile(values, 75);
+  const cap = q3 + 1.5 * (q3 - q1);
+  const max = Math.max(lo + 1, Math.min(hi, cap));
+  return { min: lo, max: max, span: (max - lo) || 1 };
+}
+function netCell(v, scale) {
+  if (v == null) return '<span class="raw-net-num muted">—</span>';
+  const over = v > scale.max;
+  const col = over ? OVER_COLOR : lerpColor((v - scale.min) / scale.span);
+  const width = over ? 100 : Math.max(2, (v / scale.max) * 100);
+  return '<span class="raw-net-bar"><span class="raw-net-fill" style="width:' + width.toFixed(1) + '%;background:' + col + '"></span></span>' +
+    '<span class="raw-net-num">' + fmtMsValue(v) + '</span>';
+}
 function labelValue(v) { return v == null || v === "" ? "(none)" : String(v); }
 function dbLabel(key) {
   const db = MODEL.databases.find(d => d.key === key);
@@ -196,7 +228,8 @@ function rawTable() {
 function renderRawRows() {
   const rows = sortedRows(filteredRows());
   const columns = state.rowMode === "pair" ? 9 : 10;
-  const rowMarkup = rows.map(rawRowHtml);
+  const scale = networkScale();
+  const rowMarkup = rows.map(row => rawRowHtml(row, scale));
   const empty = '<tr class="clusterize-no-data"><td colspan="' + columns + '" class="empty">No rows match the filters.</td></tr>';
   if (typeof Clusterize === "function") {
     rawClusterize = new Clusterize({
@@ -218,13 +251,13 @@ function renderRawRows() {
   if (body) body.innerHTML = rowMarkup.join("") || empty;
 }
 
-function rawRowHtml(row) {
+function rawRowHtml(row, scale) {
   return '<tr class="raw-' + row.status + '">' +
     '<td>' + esc(row.dbLabel) + '</td>' +
     '<td class="l">' + esc(row.placement) + '</td>' +
     (row.pairIndex == null ? '<td>' + esc(rowIndexLabel(row)) + '</td>' : '') +
     '<td>' + esc(queryLabel(row)) + '</td>' +
-    '<td>' + fmtMsValue(row.networkMs) + '</td>' +
+    '<td class="raw-net">' + netCell(row.networkMs, scale) + '</td>' +
     '<td>' + esc(row.placementColo || "—") + '</td>' +
     '<td>' + esc(row.workerColo || "—") + '</td>' +
     '<td>' + esc(row.d1Region || "—") + '</td>' +

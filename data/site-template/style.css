@@ -503,6 +503,17 @@ a:hover { text-decoration: underline; }
 .raw-table td code { color: var(--text); font-family: "IBM Plex Mono", monospace; font-size: 12px; }
 .raw-table tr.raw-failed { color: #ff918b; }
 .raw-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.raw-table td.raw-net { white-space: nowrap; }
+.raw-net-bar {
+  display: inline-block; vertical-align: middle; width: 78px; height: 7px;
+  margin-right: 9px; border-radius: 4px; background: var(--panel-2); overflow: hidden;
+}
+.raw-net-fill { display: block; height: 100%; border-radius: 4px; }
+.raw-net-num {
+  display: inline-block; min-width: 3.5ch; text-align: right; vertical-align: middle;
+  font-variant-numeric: tabular-nums; font-weight: 600;
+}
+.raw-net-num.muted { color: var(--muted); font-weight: 400; }
 .clusterize-content { outline: 0; }
 .clusterize-extra-row { margin-top: 0 !important; margin-bottom: 0 !important; }
 .clusterize-extra-row.clusterize-keep-parity { display: none; }
