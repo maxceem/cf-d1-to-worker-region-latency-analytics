@@ -311,9 +311,7 @@ async function loadBenchmarkData(rootDir) {
 
   return {
     d1Locations: unique(d1Data.locations),
-    workerPlacements: unique(workerPlacements),
-    providerRegionCoordinates: JSON.parse(await readFile(path.join(dataDir, "provider-region-coordinates.json"), "utf8")),
-    workerColoCoordinates: JSON.parse(await readFile(path.join(dataDir, "worker-colo-coordinates.json"), "utf8"))
+    workerPlacements: unique(workerPlacements)
   };
 }
 
@@ -857,8 +855,6 @@ function buildSummary(raw, benchmarkData) {
         database,
         placement,
         requests,
-        providerRegionCoordinates: benchmarkData.providerRegionCoordinates,
-        workerColoCoordinates: benchmarkData.workerColoCoordinates,
         minSuccessfulRequests
       })
     );
@@ -893,10 +889,10 @@ function buildSummary(raw, benchmarkData) {
   };
 }
 
-function summarizePlacement({ raw, database, placement, requests, providerRegionCoordinates, workerColoCoordinates, minSuccessfulRequests }) {
+function summarizePlacement({ raw, database, placement, requests, minSuccessfulRequests }) {
   const successes = requests.filter((request) => request && request.ok);
   const errors = requests.filter((request) => !request?.ok);
-  const measurements = getPairMeasurements({ requests, database, placement, providerRegionCoordinates, workerColoCoordinates });
+  const measurements = getPairMeasurements({ requests, database });
   const successful = measurements.successful;
   const reliable = isPairReliable(successful.length, minSuccessfulRequests);
   const serverTimes = reliable ? successful.map((request) => adjustedTotalMs(request.body)).filter(isFiniteNumber) : [];

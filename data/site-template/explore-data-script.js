@@ -3,8 +3,7 @@ const MODEL = JSON.parse(document.getElementById("report-data").textContent);
 const METRICS = window.MetricStats.METRICS.map(metric => [metric.key, metric.label]);
 const state = {
   filters: {},
-  rowMode: "request",
-  queryPosition: "all",
+  rowMode: "pair",
   metric: "p95",
   sort: "index",
   dir: 1,
@@ -51,14 +50,18 @@ function dbLabel(key) {
   const db = MODEL.databases.find(d => d.key === key);
   return db ? (db.observedRegion || db.label || key) : key;
 }
+function noteValues(row) {
+  const values = row.noteValues || row.notes || (row.note ? [row.note] : []);
+  return values.length ? values : [null];
+}
 const FILTERS = {
-  db: { label: "D1 location", values: row => [row.dbKey], text: dbLabel },
+  db: { label: "D1 target", values: row => [row.dbKey], text: dbLabel },
   placement: { label: "Worker target", values: row => [row.placement] },
-  placementColo: { label: "Placement colo", values: row => [labelValue(row.placementColo)] },
+  placementColo: { label: "Worker placement colo", values: row => [labelValue(row.placementColo)] },
   workerColo: { label: "Worker colo", values: row => [labelValue(row.workerColo)] },
   d1Region: { label: "D1 region", values: row => row.d1RegionValues || [row.d1Region] },
   d1Colo: { label: "D1 colo", values: row => row.d1ColoValues || [row.d1Colo] },
-  note: { label: "Note", values: row => row.noteValues || row.notes || (row.note ? [row.note] : []) },
+  note: { label: "Note", values: noteValues },
 };
 function filterValues(row, key) {
   const filter = FILTERS[key];
@@ -76,7 +79,7 @@ function hasSelectedValue(key, value) {
   return selectedValues(key).includes(value);
 }
 function anySelected() {
-  return state.queryPosition !== "all" || Object.values(state.filters).some(values => values.length);
+  return Object.values(state.filters).some(values => values.length);
 }
 function countCategory(rows, key) {
   return rows.reduce((acc, row) => {
@@ -85,7 +88,11 @@ function countCategory(rows, key) {
   }, {});
 }
 function sortedCounts(counts) {
-  return Object.entries(counts || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return Object.entries(counts || {}).sort((a, b) => {
+    if (a[0] === "(none)") return -1;
+    if (b[0] === "(none)") return 1;
+    return b[1] - a[1] || a[0].localeCompare(b[0]);
+  });
 }
 function pillHtml(key, value, count) {
   return '<button class="raw-pill' + (hasSelectedValue(key, value) ? " active" : "") + '" type="button" data-pill-filter="' + esc(key) + '" data-pill-value="' + esc(value) + '">' +
@@ -123,7 +130,7 @@ function render() {
   renderRawRows();
 }
 
-const FILTER_ORDER = ["db", "placement", "placementColo", "workerColo", "d1Region", "d1Colo", "note"];
+const FILTER_ORDER = ["db", "d1Region", "d1Colo", "placement", "placementColo", "workerColo", "note"];
 const PROVIDER_FACETS = { placement: true };
 const PROV_LABEL = { aws: "AWS", gcp: "GCP", azure: "Azure" };
 const PROV_ORDER = ["aws", "gcp", "azure"];
@@ -145,8 +152,7 @@ function modeBar() {
       ).join("") +
     '</div></div>';
   return '<div class="raw-bar"><div class="raw-bar-modes">' +
-    seg("Rows", "data-row-mode", [["request", "Requests"], ["query", "Queries"], ["pair", "Worker target"]], state.rowMode) +
-    seg("Query position", "data-query-position", [["all", "All"], ["first", "First"], ["later", "Later"]], state.queryPosition) +
+    seg("Group by", "data-row-mode", [["pair", "Worker target"], ["request", "Requests"], ["query", "Queries"]], state.rowMode) +
     seg("Metric", "data-raw-metric", METRICS, state.metric) +
     '</div>' +
     (anySelected() ? '<button class="raw-clear" type="button" data-clear-filters>Clear filters</button>' : "") +
@@ -203,14 +209,14 @@ function fmtUnit(v) {
 
 function rawTable() {
   const cols = [
-    ["db", "D1 location"],
+    ["db", "D1 target"],
     ["placement", "Worker target"],
     ["query", state.rowMode === "pair" ? "Requests" : "Query #"],
     ["networkMs", "Network (ms)"],
-    ["placementColo", "Placement colo"],
-    ["workerColo", "Worker colo"],
     ["d1Region", "D1 region"],
     ["d1Colo", "D1 colo"],
+    ["placementColo", "Worker plmt colo"],
+    ["workerColo", "Worker colo"],
     ["note", "Note"],
   ];
   if (state.rowMode !== "pair") cols.splice(2, 0, ["index", "Req #"]);
@@ -258,10 +264,10 @@ function rawRowHtml(row, scale) {
     (row.pairIndex == null ? '<td>' + esc(rowIndexLabel(row)) + '</td>' : '') +
     '<td>' + esc(queryLabel(row)) + '</td>' +
     '<td class="raw-net">' + netCell(row.networkMs, scale) + '</td>' +
-    '<td>' + esc(row.placementColo || "—") + '</td>' +
-    '<td>' + esc(row.workerColo || "—") + '</td>' +
     '<td>' + esc(row.d1Region || "—") + '</td>' +
     '<td>' + esc(row.d1Colo || "—") + '</td>' +
+    '<td>' + esc(row.placementColo || "—") + '</td>' +
+    '<td>' + esc(row.workerColo || "—") + '</td>' +
     '<td class="l raw-note">' + esc(row.note || "—") + '</td>' +
   '</tr>';
 }
@@ -281,13 +287,13 @@ function filteredRows(skipKey) {
 
 function displayRows() {
   if (state.rowMode === "pair") return pairRows();
-  const queries = queryRows();
+  const queries = MODEL.rows;
   return state.rowMode === "request" ? requestRows(queries) : queries;
 }
 
 function pairRows() {
   const grouped = new Map();
-  for (const row of queryRows()) {
+  for (const row of MODEL.rows) {
     const key = row.dbKey + "|" + row.placement;
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(row);
@@ -341,10 +347,6 @@ function groupByRequest(rows) {
     grouped.get(key).push(row);
   }
   return [...grouped.values()];
-}
-
-function queryRows() {
-  return MODEL.rows.filter(row => state.queryPosition === "all" || row.queryPosition === state.queryPosition);
 }
 
 function requestRows(rows) {
@@ -442,12 +444,6 @@ function wire() {
       render();
     };
   });
-  document.querySelectorAll("[data-query-position]").forEach(button => {
-    button.onclick = () => {
-      state.queryPosition = button.getAttribute("data-query-position");
-      render();
-    };
-  });
   document.querySelectorAll("[data-raw-metric]").forEach(button => {
     button.onclick = () => {
       state.metric = button.getAttribute("data-raw-metric");
@@ -478,7 +474,6 @@ function wire() {
   document.querySelectorAll("[data-clear-filters]").forEach(button => {
     button.onclick = () => {
       state.filters = {};
-      state.queryPosition = "all";
       render();
     };
   });

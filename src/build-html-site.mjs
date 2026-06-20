@@ -42,18 +42,17 @@ async function main() {
 
   const inputPath = await resolveInputPath(args.input);
   const raw = JSON.parse(await readFile(inputPath, "utf8"));
-  const [basemap, d1LocationCoordinates, providerRegionCoordinates, workerColoCoordinates] = await Promise.all([
+  const [basemap, d1LocationCoordinates, providerRegionCoordinates] = await Promise.all([
     readJson("data/world-basemap.json"),
     readJson("data/d1-location-coordinates.json"),
     readJson("data/provider-region-coordinates.json"),
-    readJson("data/worker-colo-coordinates.json"),
   ]);
-  const model = buildModel(raw, { providerRegionCoordinates, workerColoCoordinates });
+  const model = buildModel(raw);
   model.basemap = basemap;
   model.d1coords = d1LocationCoordinates;
   model.coords = providerRegionCoordinates;
   model.repoUrl = REPO_URL;
-  const exploreDataModel = buildRawModel(raw, { providerRegionCoordinates, workerColoCoordinates });
+  const exploreDataModel = buildRawModel(raw);
   exploreDataModel.repoUrl = REPO_URL;
 
   const outputPath = resolvePath(args.output || DEFAULT_OUTPUT_PATH);
@@ -162,7 +161,7 @@ async function readJson(path) {
 // Model: turn raw measurements into per-pair statistics the page can render.
 // ---------------------------------------------------------------------------
 
-function buildModel(raw, { providerRegionCoordinates, workerColoCoordinates }) {
+function buildModel(raw) {
   const run = raw.run || {};
   const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
   const databases = (raw.databases || []).map((db) => ({
@@ -181,8 +180,6 @@ function buildModel(raw, { providerRegionCoordinates, workerColoCoordinates }) {
     for (const placement of placements) {
       const requests = byPlacement[placement] || [];
       pairs.push(summarizePair(db, placement, requests, {
-        providerRegionCoordinates,
-        workerColoCoordinates,
         minSuccessfulRequests
       }));
     }
@@ -212,7 +209,7 @@ function buildModel(raw, { providerRegionCoordinates, workerColoCoordinates }) {
   };
 }
 
-function buildRawModel(raw, { providerRegionCoordinates, workerColoCoordinates }) {
+function buildRawModel(raw) {
   const run = raw.run || {};
   const databases = (raw.databases || []).map((db) => ({
     key: db.key,
@@ -228,7 +225,7 @@ function buildRawModel(raw, { providerRegionCoordinates, workerColoCoordinates }
     const db = databaseByKey[dbKey];
     if (!db) continue;
     for (const [placement, requests] of Object.entries(byPlacement || {})) {
-      const measurements = getPairMeasurements({ requests, database: db, placement, providerRegionCoordinates, workerColoCoordinates });
+      const measurements = getPairMeasurements({ requests, database: db });
       requests.forEach((request, requestIndex) => {
         rows.push(...rawQueryRows({ db, placement, request, requestIndex, measurements }));
       });
@@ -271,7 +268,6 @@ function rawQueryRows({ db, placement, request, requestIndex, measurements }) {
     placement,
     requestIndex,
     queryIndex,
-    queryPosition: queryIndex == null ? "request" : queryIndex === 0 ? "first" : "later",
     status,
     note: notes.join(", ") || null,
     notes,
@@ -320,8 +316,8 @@ function serializeBenchmarkConfig(benchmark) {
   };
 }
 
-function summarizePair(db, placement, requests, { providerRegionCoordinates, workerColoCoordinates, minSuccessfulRequests }) {
-  const measurements = getPairMeasurements({ requests, database: db, placement, providerRegionCoordinates, workerColoCoordinates });
+function summarizePair(db, placement, requests, { minSuccessfulRequests }) {
+  const measurements = getPairMeasurements({ requests, database: db });
   const successful = measurements.successful;
   const reliable = isPairReliable(successful.length, minSuccessfulRequests);
   const rawTotals = reliable ? successful.map((r) => r.body.totalMs).filter(isFiniteNumber) : [];
