@@ -412,28 +412,34 @@ function mergeCounts(objects) {
 const TEMPLATE_DIR = resolve(rootDir, "data/site-template");
 
 async function renderHtml(model, { scriptName, title, page }) {
-  const [template, style, metricStatsScript, script, clusterizeScript] = await Promise.all([
+  const [template, siteHeaderTemplate, style, metricStatsScript, commonScript, script, clusterizeScript] = await Promise.all([
     readFile(resolve(TEMPLATE_DIR, "index.html"), "utf8"),
+    readFile(resolve(TEMPLATE_DIR, "site-header.html"), "utf8"),
     readFile(resolve(TEMPLATE_DIR, "style.css"), "utf8"),
     readFile(resolve(rootDir, "src/metric-stats.cjs"), "utf8"),
+    readFile(resolve(TEMPLATE_DIR, "common.js"), "utf8"),
     readFile(resolve(TEMPLATE_DIR, scriptName), "utf8"),
     page === "explore-data" ? readFile(resolve(rootDir, "node_modules/clusterize.js/clusterize.min.js"), "utf8") : Promise.resolve(""),
   ]);
   const dataJson = JSON.stringify(model).replace(/</g, "\\u003c");
+  const pageValues = {
+    repoUrl: escapeHtmlAttr(REPO_URL),
+    overviewHref: page === "overview" ? "#" : "index.html",
+    exploreDataHref: page === "explore-data" ? "#" : "explore-data.html",
+    overviewClass: page === "overview" ? "active" : "",
+    exploreDataClass: page === "explore-data" ? "active" : "",
+  };
   const bundledScript = [
     browserMetricStatsScript(metricStatsScript),
     page === "explore-data" ? clusterizeScript.trimEnd() : "",
+    commonScript.trimEnd(),
     script.trimEnd(),
   ].filter(Boolean).join("\n");
 
   return fillTemplate(template, {
     title: escapeHtml(title),
     dataJson,
-    repoUrl: escapeHtmlAttr(REPO_URL),
-    overviewHref: page === "overview" ? "#" : "index.html",
-    exploreDataHref: page === "explore-data" ? "#" : "explore-data.html",
-    overviewClass: page === "overview" ? "active" : "",
-    exploreDataClass: page === "explore-data" ? "active" : "",
+    siteHeader: fillTemplate(siteHeaderTemplate, pageValues),
     script: "\n" + bundledScript + "\n",
     style: "\n" + style.trimEnd() + "\n",
   });

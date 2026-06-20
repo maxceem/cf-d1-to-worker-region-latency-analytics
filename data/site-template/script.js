@@ -6,6 +6,8 @@ const state = { db: (MODEL.databases[0] && MODEL.databases[0].key) || "all",
   heroM: { 1: "p95", 2: "p95", 3: "p95", 4: "p95", 5: "p95",
            6: "p95", 7: "p95", 8: "p95", 9: "p95", 10: "p95", 11: "p95",
            12: "p95", 13: "p95", 14: "p95", 15: "p95" } };
+const esc = Site.escapeHtml;
+const lerpColor = Site.latencyColor;
 
 function fmt(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0) + "ms"; }
 function fmtNum(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
@@ -32,21 +34,10 @@ function placeCoord(placement) {
   const prov = placement.slice(0, i), region = placement.slice(i + 1);
   return (MODEL.coords[prov] || {})[region] || null;
 }
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function counts(obj) {
   const e = Object.entries(obj || {});
   if (!e.length) return "—";
   return e.sort((a,b)=>b[1]-a[1]).map(([k,v]) => k + ":" + v).join(", ");
-}
-function lerpColor(t) {
-  // 0 = fast/green, 1 = slow/red, via amber midpoint
-  t = Math.max(0, Math.min(1, t));
-  const stops = [[31,156,77],[216,197,49],[217,83,79]];
-  const seg = t < .5 ? 0 : 1;
-  const lt = t < .5 ? t/.5 : (t-.5)/.5;
-  const a = stops[seg], b = stops[seg+1];
-  const c = a.map((x,i)=>Math.round(x+(b[i]-x)*lt));
-  return "rgb(" + c.join(",") + ")";
 }
 function dbLabel(key) {
   const d = MODEL.databases.find(d => d.key === key);
@@ -61,7 +52,7 @@ function render() {
     heroExplorations() +
     regionPanel() +
     metaFooter() +
-    pageFooter();
+    Site.pageFooter(MODEL);
   wire();
 }
 
@@ -178,17 +169,6 @@ function metaFooter() {
   '</section>';
 }
 
-function pageFooter() {
-  return '<footer class="pagefoot">' +
-    '<div class="foot-left">' +
-      '<span>Made by <a href="https://github.com/maxceem" target="_blank" rel="noopener">@maxceem</a></span>' +
-      '<span class="foot-note">Not affiliated with Cloudflare.</span>' +
-    '</div>' +
-    '<span>Open source — <a href="' + esc(MODEL.repoUrl) + '" target="_blank" rel="noopener">fork it on GitHub</a>' +
-    ' and rerun these analytics on your own Cloudflare account.</span>' +
-  '</footer>';
-}
-
 function tabsPanel() {
   // Row 1: one tab per D1 region plus "All" (the ranked view across every pair).
   let dbTabs = '<button class="tab' + (state.db === "all" ? " active" : "") + '" data-db="all">All</button>';
@@ -196,15 +176,9 @@ function tabsPanel() {
     dbTabs += '<button class="tab' + (state.db === d.key ? " active" : "") + '" data-db="' + esc(d.key) + '">' +
       esc(dbLabel(d.key)) + '</button>';
   }
-  // Row 2: metric tabs (no "All" — one is always selected).
-  let mTabs = "";
-  for (const m of METRICS) {
-    mTabs += '<button class="tab' + (state.metric === m.key ? " active" : "") + '" data-metric="' + m.key + '">' +
-      esc(m.label) + '</button>';
-  }
   return '<div class="tabs">' +
     '<div class="tabrow"><span class="tablabel">D1 region</span><div class="tabset">' + dbTabs + '</div></div>' +
-    '<div class="tabrow"><span class="tablabel">Metric</span><div class="tabset">' + mTabs + '</div></div>' +
+    '<div class="tabrow">' + metricSwitch("Metric") + '</div>' +
   '</div>';
 }
 
@@ -245,6 +219,15 @@ function heroTabs(ver, cls) {
       '" data-herok="' + m.key + '">' + esc(m.label) + '</button>';
   }
   return t;
+}
+
+function metricSwitch(label) {
+  return Site.segmentedControl({
+    label,
+    options: METRICS.map(metric => ({ value: metric.key, label: metric.label })),
+    current: state.metric,
+    attr: "data-metric",
+  });
 }
 
 function heroExplorations() {
@@ -579,18 +562,13 @@ function cartoSpot(ver, schemeCls, kicker) {
   }
   return '<section class="hx hx12 ' + schemeCls + '">' +
     '<div class="hx12head"><span class="hx12kick">' + kicker + '</span>' +
-      '<span class="hx12tabs">' + metricPills("vt") + '</span></div>' +
+      '<span class="hx12tabs">' + metricPills() + '</span></div>' +
     '<div class="v12grid">' + cards + '</div>' +
   '</section>';
 }
 // Global metric ("P") filter pills — drives the cards and the stats below.
-function metricPills(cls) {
-  let t = "";
-  for (const m of METRICS) {
-    t += '<button class="' + cls + (state.metric === m.key ? " on" : "") +
-      '" data-metric="' + m.key + '">' + esc(m.label) + '</button>';
-  }
-  return t;
+function metricPills() {
+  return metricSwitch("");
 }
 function heroV12() { return cartoSpot(12, "", "12 ◵ Cartogram · Spotlight skin"); }
 function heroV13() { return cartoSpot(13, "s-slate", ""); }
@@ -962,23 +940,6 @@ function wire() {
   });
 }
 
-// theme switcher (persisted)
-(function initTheme() {
-  const root = document.documentElement;
-  let saved = "light";
-  try { saved = localStorage.getItem("d1theme") || "light"; } catch (e) {}
-  root.setAttribute("data-theme", saved);
-  const btn = document.getElementById("themeToggle");
-  const paint = () => { btn.textContent = root.getAttribute("data-theme") === "light" ? "☀" : "☾"; };
-  paint();
-  btn.onclick = () => {
-    const next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("d1theme", next); } catch (e) {}
-    paint();
-  };
-})();
-
-// wrap content for max-width consistency
-document.getElementById("app").className = "wrap";
+Site.initTheme();
+Site.setAppClass("wrap");
 render();

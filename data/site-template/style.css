@@ -67,6 +67,8 @@ body {
   background: transparent; border: none; color: var(--muted);
   font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
+.theme-toggle::before { content: "☾"; }
+[data-theme="light"] .theme-toggle::before { content: "☀"; }
 .theme-toggle:hover { color: var(--text); }
 
 .wrap { max-width: 1180px; margin: 0 auto; padding: 80px 20px 96px; }
@@ -174,6 +176,13 @@ a:hover { text-decoration: underline; }
 }
 .tab:hover { color: var(--text); border-color: var(--accent-2); }
 .tab.active { background: var(--accent-2); color: #fff; border-color: var(--accent-2); font-weight: 600; }
+.seg { display: flex; align-items: center; gap: 7px; }
+.seg-label { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.seg-set { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg-btn { background: var(--panel); border: none; border-left: 1px solid var(--border); padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.seg-btn:first-child { border-left: none; }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--accent-2); color: #fff; }
 
 /* ===== "Best worker regions" — 5 concept explorations ===== */
 .hx-lab { display: flex; flex-direction: column; gap: 30px; margin: 8px 0 56px; }
@@ -413,7 +422,7 @@ a:hover { text-decoration: underline; }
 .hx12.s-clay { --bg1: #1a1817; --bg2: #100f0e; --bd: #2c2926; --ac: #cf8259; --tabbd: #352f2a;
   --mut: #948b83; --cardbg: #161413; --ocean: #131110; --land: #34302c; --txt: #efe9e4; --foot: #c4bbb3;
   --fademid: rgba(16,15,14,.5); --fadeend: rgba(16,15,14,.88); }
-.hx12head { display: flex; align-items: center; justify-content: flex-start; margin-bottom: 18px; }
+.hx12head { display: flex; align-items: center; justify-content: flex-start; margin-bottom: 56px; }
 .hx12kick { font-size: 11px; letter-spacing: .24em; text-transform: uppercase; color: var(--ac); font-weight: 700; }
 .hx12tabs { display: flex; gap: 0; }
 .v12tab { font-family: "Bricolage Grotesque", sans-serif; font-size: 11px; font-weight: 600; background: none; border: 1px solid var(--tabbd); color: var(--mut); padding: 4px 10px; border-radius: 999px; cursor: pointer; }
@@ -443,12 +452,13 @@ a:hover { text-decoration: underline; }
   .wrap { padding: 44px 16px 72px; }
   h1 { font-size: 38px; letter-spacing: -.6px; margin-bottom: 26px; }
   h2 { font-size: 24px; margin: 40px 0 16px; }
-  .vt { padding: 6px 10px; }
+  .seg-btn { padding: 6px 10px; }
   .bars { grid-template-columns: minmax(0, 130px) 1fr auto; column-gap: 10px; }
   .topbar { top: 14px; }
 }
 
 .raw-wrap { max-width: 1440px; }
+.raw-wrap .pagefoot { max-width: 1180px; margin-left: auto; margin-right: auto; }
 .raw-head { max-width: 1140px; margin: 0 auto 24px; }
 .raw-head h1 { margin-bottom: 12px; }
 .raw-run { color: var(--muted); font-size: 12.5px; margin: -2px 0 14px; font-variant-numeric: tabular-nums; }
@@ -456,13 +466,6 @@ a:hover { text-decoration: underline; }
 .raw-filters { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 22px; overflow: hidden; }
 .raw-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding: 12px 16px; background: var(--panel-2); border-bottom: 1px solid var(--border); }
 .raw-bar-modes { display: flex; flex-wrap: wrap; gap: 14px; }
-.raw-seg { display: flex; align-items: center; gap: 7px; }
-.raw-seg > span { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
-.raw-segset { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
-.raw-segbtn { background: var(--panel); border: none; border-left: 1px solid var(--border); padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; }
-.raw-segbtn:first-child { border-left: none; }
-.raw-segbtn:hover { color: var(--text); }
-.raw-segbtn.active { background: var(--accent-2); color: #fff; }
 .raw-clear { margin-left: auto; min-height: 30px; border: 1px solid var(--border); border-radius: 7px; padding: 0 12px; background: var(--panel); color: var(--text); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 .raw-clear:hover { border-color: var(--accent-2); }
 
@@ -594,13 +597,6 @@ table.matrix th.rowhead { text-align: left; }
 /* region stats: list / map view switch */
 .rp-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 52px 0 20px; }
 .rp-head h2 { margin: 0; }
-.viewtog { display: flex; flex-shrink: 0; }
-.vt { font-family: inherit; font-size: 12px; font-weight: 600; padding: 6px 14px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); cursor: pointer; }
-.vt + .vt { border-left: none; }
-.vt:first-child { border-radius: 8px 0 0 8px; }
-.vt:last-child { border-radius: 0 8px 8px 0; }
-.vt.on { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
-.vt.on + .vt { border-left: 1px solid var(--accent-2); }
 .mapwrap { background: var(--map-ocean); border-radius: 10px; overflow: hidden; position: relative; }
 .map-name { position: absolute; top: 16px; left: max(20px, calc((100vw - 1180px) / 2 + 20px)); z-index: 2; font-size: 16px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text); text-shadow: 0 1px 8px rgba(0,0,0,.55); pointer-events: none; }
 .list-title { font-size: 16px; font-weight: 600; letter-spacing: .04em; color: var(--text); margin: 0 0 18px; }

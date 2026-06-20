@@ -10,19 +10,11 @@ const state = {
   expandedProviders: [],
 };
 let rawClusterize = null;
+const esc = Site.escapeHtml;
+const lerpColor = Site.latencyColor;
 
-function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function fmtMsValue(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
 const OVER_COLOR = "#e5534b";
-function lerpColor(t) {
-  // 0 = fast/green, 1 = slow/red, via amber midpoint (matches the overview page scale).
-  t = Math.max(0, Math.min(1, t));
-  const stops = [[31, 156, 77], [216, 197, 49], [217, 83, 79]];
-  const seg = t < .5 ? 0 : 1;
-  const lt = t < .5 ? t / .5 : (t - .5) / .5;
-  const a = stops[seg], b = stops[seg + 1];
-  return "rgb(" + a.map((x, i) => Math.round(x + (b[i] - x) * lt)).join(",") + ")";
-}
 // Global latency scale over the whole (unfiltered) dataset for the current row mode and
 // metric, so cell colors stay comparable no matter which filters are selected. The upper
 // bound is capped at the Tukey fence (q3 + 1.5·IQR) so a few outliers don't flatten the range.
@@ -125,7 +117,8 @@ function render() {
       '<p class="sub">Inspect every measured query, including D1 serving location, Worker reported colo, and the placement header returned by Cloudflare.</p>' +
     '</section>' +
     filtersPanel() +
-    rawTable();
+    rawTable() +
+    Site.pageFooter(MODEL);
   wire();
   renderRawRows();
 }
@@ -145,12 +138,12 @@ function filtersPanel() {
 }
 
 function modeBar() {
-  const seg = (label, attr, options, current) =>
-    '<div class="raw-seg"><span>' + label + '</span><div class="raw-segset" role="group" aria-label="' + label + '">' +
-      options.map(([value, lbl]) =>
-        '<button class="raw-segbtn' + (current === value ? " active" : "") + '" type="button" ' + attr + '="' + value + '">' + lbl + '</button>'
-      ).join("") +
-    '</div></div>';
+  const seg = (label, attr, options, current) => Site.segmentedControl({
+    label,
+    options: options.map(([value, label]) => ({ value, label })),
+    current,
+    attr,
+  });
   return '<div class="raw-bar"><div class="raw-bar-modes">' +
     seg("Group by", "data-row-mode", [["pair", "Worker target"], ["request", "Requests"], ["query", "Queries"]], state.rowMode) +
     seg("Metric", "data-raw-metric", METRICS, state.metric) +
@@ -487,21 +480,6 @@ function wire() {
   });
 }
 
-(function initTheme() {
-  const root = document.documentElement;
-  let saved = "light";
-  try { saved = localStorage.getItem("d1theme") || "light"; } catch (e) {}
-  root.setAttribute("data-theme", saved);
-  const btn = document.getElementById("themeToggle");
-  const paint = () => { btn.textContent = root.getAttribute("data-theme") === "light" ? "☀" : "☾"; };
-  paint();
-  btn.onclick = () => {
-    const next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("d1theme", next); } catch (e) {}
-    paint();
-  };
-})();
-
-document.getElementById("app").className = "wrap raw-wrap";
+Site.initTheme();
+Site.setAppClass("wrap raw-wrap");
 render();
