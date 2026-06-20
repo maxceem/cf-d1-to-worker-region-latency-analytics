@@ -22,7 +22,7 @@ import {
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const MetricStats = require("./metric-stats.cjs");
-const { average, isFiniteNumber, numberOrNull } = MetricStats;
+const { DEFAULT_AGGREGATE_METRIC, average, isFiniteNumber, numberOrNull } = MetricStats;
 
 // Public repository URL shown in the report's "Source" link. Update before deploy.
 const REPO_URL = "https://github.com/maxceem/cf-d1-to-worker-region-latency-analytics";
@@ -192,7 +192,7 @@ function buildModel(raw) {
   // Global ranking across every D1 x Worker pair.
   const ranked = pairs
     .filter((p) => p.status === "ok")
-    .sort((a, b) => compareNullable(a.p95, b.p95) || compareNullable(a.avg, b.avg));
+    .sort((a, b) => compareNullable(a[DEFAULT_AGGREGATE_METRIC], b[DEFAULT_AGGREGATE_METRIC]) || compareNullable(a.avg, b.avg));
   const best = ranked[0] || null;
 
   return {
@@ -333,7 +333,7 @@ function summarizePair(db, placement, requests, { minSuccessfulRequests }) {
     .flatMap((r) => (r.body.d1 && r.body.d1.sqlDurations) || [])
     .filter(isFiniteNumber) : [];
   const metricStats = reliable
-    ? MetricStats.twoStepMetricStats(successful.map((request) => adjustedPerQueryMs(request.body)))
+    ? MetricStats.metricStats(perQuery)
     : MetricStats.emptyMetricStats();
 
   const workerColos = mergeCounts(successful.map((r) => ({ [r.body.workerColo]: 1 })));
@@ -564,10 +564,7 @@ function rawPairRows(rows) {
   }
   return [...grouped.values()].map((rowsForPair) => {
     const first = rowsForPair[0];
-    const requests = rawGroupByRequest(rowsForPair);
-    const requestValues = requests
-      .map(rowsForRequest => MetricStats.reduceMetric(rowsForRequest.map(row => row.networkMs), "p95"))
-      .filter(value => value != null);
+    const networkValues = rowsForPair.map(row => row.networkMs).filter(value => value != null);
     const placementColoValues = uniqueValues(rowsForPair.map(row => row.placementColo).filter(Boolean));
     const workerColoValues = uniqueValues(rowsForPair.map(row => row.workerColo).filter(Boolean));
     const d1RegionValues = uniqueValues(rowsForPair.flatMap(row => row.d1RegionValues || [row.d1Region]).filter(Boolean));
@@ -586,7 +583,7 @@ function rawPairRows(rows) {
       d1ColoValues,
       noteValues,
       note: noteValues.join(", ") || null,
-      networkMs: MetricStats.reduceMetric(requestValues, "p95"),
+      networkMs: MetricStats.reduceMetric(networkValues, DEFAULT_AGGREGATE_METRIC),
     };
   });
 }

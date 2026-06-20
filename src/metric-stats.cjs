@@ -1,5 +1,6 @@
 "use strict";
 
+const DEFAULT_AGGREGATE_METRIC = "p50";
 const METRICS = [
   { key: "p50", label: "p50" },
   { key: "p90", label: "p90" },
@@ -76,25 +77,12 @@ function metricStats(values) {
   return stats;
 }
 
-function twoStepMetricStats(groups) {
-  const stats = {};
-  let avgRequestValues = [];
-  for (const key of METRIC_KEYS) {
-    const requestValues = groups
-      .map((values) => reduceMetric(values, key))
-      .filter(isFiniteNumber);
-    stats[key] = reduceMetric(requestValues, key);
-    if (key === "avg") avgRequestValues = requestValues;
-  }
-  stats.stddev = stddev(avgRequestValues);
-  return stats;
-}
-
 function emptyMetricStats() {
   return { avg: null, p50: null, p90: null, p95: null, p99: null, min: null, max: null, stddev: null };
 }
 
 module.exports = {
+  DEFAULT_AGGREGATE_METRIC,
   METRICS,
   METRIC_KEYS,
   average,
@@ -109,5 +97,4 @@ module.exports = {
   reduceMetric,
   sortedValues,
   stddev,
-  twoStepMetricStats,
 };

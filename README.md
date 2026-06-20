@@ -4,7 +4,7 @@ When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips
 
 This benchmark measures the latency between D1 and a Worker when that Worker is pinned to a specific third-party cloud region, such as AWS, GCP, or Azure, using Cloudflare's [`region` placement configuration](https://developers.cloudflare.com/workers/configuration/placement/#specify-a-cloud-region).
 
-### Best worker location per D1 region (p95)
+### Best worker location per D1 region (p50)
 
 [View full analytics report](https://maxceem.github.io/cf-d1-to-worker-region-latency-analytics/)
 

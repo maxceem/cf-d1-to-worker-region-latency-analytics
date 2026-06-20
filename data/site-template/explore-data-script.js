@@ -2,10 +2,11 @@
 const MODEL = JSON.parse(document.getElementById("report-data").textContent);
 const ROW_CHUNKS = Array.from(document.querySelectorAll("[data-report-rows]"));
 const METRICS = window.MetricStats.METRICS.map(metric => [metric.key, metric.label]);
+const DEFAULT_AGGREGATE_METRIC = window.MetricStats.DEFAULT_AGGREGATE_METRIC;
 const state = {
   filters: {},
   rowMode: "pair",
-  metric: "p95",
+  metric: DEFAULT_AGGREGATE_METRIC,
   sort: "networkMs",
   dir: 1,
   expandedProviders: [],
@@ -325,8 +326,8 @@ function pairRows() {
   return [...grouped.values()].map((rowsForPair, pairIndex) => {
     const first = rowsForPair[0];
     const requests = groupByRequest(rowsForPair);
-    const requestValues = requests
-      .map(rowsForRequest => window.MetricStats.reduceMetric(rowsForRequest.map(row => row.networkMs), state.metric))
+    const networkValues = rowsForPair
+      .map(row => row.networkMs)
       .filter(v => v != null);
     const placementColoValues = unique(rowsForPair.map(row => row.placementColo).filter(Boolean));
     const workerColoValues = unique(rowsForPair.map(row => row.workerColo).filter(Boolean));
@@ -334,7 +335,7 @@ function pairRows() {
     const d1ColoValues = unique(rowsForPair.flatMap(row => row.d1ColoValues || [row.d1Colo]).filter(Boolean));
     const noteValues = unique(rowsForPair.flatMap(row => row.notes || (row.note ? [row.note] : [])));
     const minSuccessfulRequests = MODEL.run.minSuccessfulRequests || MODEL.run.benchmark?.minSuccessfulRequests || 1;
-    const successCount = requestValues.length;
+    const successCount = requests.filter(rowsForRequest => rowsForRequest.some(row => row.status === "ok")).length;
     return {
       id: first.dbKey + "|" + first.placement,
       pairIndex,
@@ -346,8 +347,8 @@ function pairRows() {
       status: successCount >= minSuccessfulRequests ? "ok" : "failed",
       note: noteValues.join(", ") || null,
       notes: noteValues,
-      networkMs: window.MetricStats.reduceMetric(requestValues, state.metric),
-      measuredQueryCount: rowsForPair.filter(row => row.networkMs != null).length,
+      networkMs: window.MetricStats.reduceMetric(networkValues, state.metric),
+      measuredQueryCount: networkValues.length,
       successCount,
       requestCount: requests.length,
       placementColo: placementColoValues.join("+") || null,

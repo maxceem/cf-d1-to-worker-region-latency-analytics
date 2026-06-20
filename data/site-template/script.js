@@ -1,11 +1,13 @@
 "use strict";
 const MODEL = JSON.parse(document.getElementById("report-data").textContent);
 const METRICS = window.MetricStats.METRICS;
+const DEFAULT_AGGREGATE_METRIC = window.MetricStats.DEFAULT_AGGREGATE_METRIC;
 const state = { db: (MODEL.databases[0] && MODEL.databases[0].key) || "all",
-  metric: "p95", sort: "metric", dir: 1, matrixSort: "p95", matrixDir: 1, regionView: "list",
-  heroM: { 1: "p95", 2: "p95", 3: "p95", 4: "p95", 5: "p95",
-           6: "p95", 7: "p95", 8: "p95", 9: "p95", 10: "p95", 11: "p95",
-           12: "p95", 13: "p95", 14: "p95", 15: "p95" } };
+  metric: DEFAULT_AGGREGATE_METRIC, sort: "metric", dir: 1, matrixSort: DEFAULT_AGGREGATE_METRIC, matrixDir: 1, regionView: "list",
+  heroM: { 1: DEFAULT_AGGREGATE_METRIC, 2: DEFAULT_AGGREGATE_METRIC, 3: DEFAULT_AGGREGATE_METRIC, 4: DEFAULT_AGGREGATE_METRIC,
+           5: DEFAULT_AGGREGATE_METRIC, 6: DEFAULT_AGGREGATE_METRIC, 7: DEFAULT_AGGREGATE_METRIC, 8: DEFAULT_AGGREGATE_METRIC,
+           9: DEFAULT_AGGREGATE_METRIC, 10: DEFAULT_AGGREGATE_METRIC, 11: DEFAULT_AGGREGATE_METRIC, 12: DEFAULT_AGGREGATE_METRIC,
+           13: DEFAULT_AGGREGATE_METRIC, 14: DEFAULT_AGGREGATE_METRIC, 15: DEFAULT_AGGREGATE_METRIC } };
 const esc = Site.escapeHtml;
 const lerpColor = Site.latencyColor;
 
@@ -259,7 +261,7 @@ function metaFooter() {
     '<p class="sub">Every Worker location was benchmarked against every D1 region. For each pairing we sent ' +
       num(measured) + ' timed requests' + (b.warmupRequests ? ' (after ' + num(b.warmupRequests) + ' warm-ups)' : '') +
       ', each running ' + (b.queriesPerRequest ? num(b.queriesPerRequest) + ' sequential D1 queries' : 'its D1 queries') +
-      ', and recorded per-query network latency measured inside the Worker. Pair metrics apply the selected metric to the queries in each request, then apply the same metric across requests.</p>' +
+      ', and recorded per-query network latency measured inside the Worker. Pair metrics apply the selected metric to the pooled query samples for that pair.</p>' +
     '<table class="measure-table"><tbody>' + rows + '</tbody></table>' +
   '</section>';
 }

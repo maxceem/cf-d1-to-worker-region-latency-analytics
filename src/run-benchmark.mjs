@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -13,11 +14,14 @@ import {
   parsePlacementHeader
 } from "./placement-eligibility.mjs";
 
+const require = createRequire(import.meta.url);
+const { DEFAULT_AGGREGATE_METRIC } = require("./metric-stats.cjs");
 const VALID_D1_JURISDICTIONS = new Set(["eu", "fedramp"]);
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DATA_DIR = "data";
 const D1_LOCATIONS_FILE = "d1-locations.json";
 const DEFAULT_CONFIG_PATH = "benchmark.config.json";
+const DEFAULT_AGGREGATE_FIELD = `${DEFAULT_AGGREGATE_METRIC}DbMs`;
 const WORKER_DEPLOY_RETRY_ATTEMPTS = 4;
 const WORKER_DEPLOY_RETRY_DELAY_MS = 5000;
 let cachedWranglerInvocation;
@@ -860,7 +864,7 @@ function buildSummary(raw, benchmarkData) {
     );
     const ranked = placements
       .slice()
-      .sort((a, b) => compareNullable(a.p95DbMs, b.p95DbMs) || compareNullable(a.avgDbMs, b.avgDbMs))
+      .sort((a, b) => compareNullable(a[DEFAULT_AGGREGATE_FIELD], b[DEFAULT_AGGREGATE_FIELD]) || compareNullable(a.avgDbMs, b.avgDbMs))
       .map((item, index) => ({ rank: index + 1, ...item }));
 
     byDatabase[database.key] = {
@@ -868,7 +872,7 @@ function buildSummary(raw, benchmarkData) {
       placements,
       ranked,
       recommendation: ranked.find((item) => item.status === "ok")
-        ? `Use ${ranked.find((item) => item.status === "ok").placement} for D1 ${database.label} based on the lowest p95 latency in this run.`
+        ? `Use ${ranked.find((item) => item.status === "ok").placement} for D1 ${database.label} based on the lowest ${DEFAULT_AGGREGATE_METRIC} latency in this run.`
         : `No successful benchmark requests were recorded for D1 ${database.label}.`
     };
     allRanked.push(...ranked.map((item) => ({ ...item, databaseKey: database.key, databaseLabel: database.label })));
@@ -876,7 +880,7 @@ function buildSummary(raw, benchmarkData) {
 
   const best = allRanked
     .filter((item) => item.status === "ok")
-    .sort((a, b) => compareNullable(a.p95DbMs, b.p95DbMs) || compareNullable(a.avgDbMs, b.avgDbMs))[0];
+    .sort((a, b) => compareNullable(a[DEFAULT_AGGREGATE_FIELD], b[DEFAULT_AGGREGATE_FIELD]) || compareNullable(a.avgDbMs, b.avgDbMs))[0];
 
   return {
     run: raw.run,
@@ -884,7 +888,7 @@ function buildSummary(raw, benchmarkData) {
     byDatabase,
     ranked: allRanked,
     recommendation: best
-      ? `Best observed pair: D1 ${best.databaseLabel} x Worker ${best.placement} based on the lowest p95 latency in this run.`
+      ? `Best observed pair: D1 ${best.databaseLabel} x Worker ${best.placement} based on the lowest ${DEFAULT_AGGREGATE_METRIC} latency in this run.`
       : "No successful benchmark requests were recorded."
   };
 }
@@ -895,7 +899,6 @@ function summarizePlacement({ raw, database, placement, requests, minSuccessfulR
   const measurements = getPairMeasurements({ requests, database });
   const successful = measurements.successful;
   const reliable = isPairReliable(successful.length, minSuccessfulRequests);
-  const serverTimes = reliable ? successful.map((request) => adjustedTotalMs(request.body)).filter(isFiniteNumber) : [];
   const rawServerTimes = reliable ? successful.map((request) => request.body?.totalMs).filter(isFiniteNumber) : [];
   const perQueryTimes = reliable ? successful.flatMap((request) => adjustedPerQueryMs(request.body)).filter(isFiniteNumber) : [];
   const rawPerQueryTimes = reliable ? successful.flatMap((request) => request.body?.perQueryMs ?? []).filter(isFiniteNumber) : [];
@@ -924,14 +927,14 @@ function summarizePlacement({ raw, database, placement, requests, minSuccessfulR
     status: reliable ? "ok" : "failed",
     errorCount: errors.length,
     errors: summarizeErrors(errors),
-    avgDbMs: average(serverTimes),
-    p50DbMs: percentile(serverTimes, 50),
-    p90DbMs: percentile(serverTimes, 90),
-    p95DbMs: percentile(serverTimes, 95),
-    p99DbMs: percentile(serverTimes, 99),
-    minDbMs: min(serverTimes),
-    maxDbMs: max(serverTimes),
-    stddevDbMs: stddev(serverTimes),
+    avgDbMs: average(perQueryTimes),
+    p50DbMs: percentile(perQueryTimes, 50),
+    p90DbMs: percentile(perQueryTimes, 90),
+    p95DbMs: percentile(perQueryTimes, 95),
+    p99DbMs: percentile(perQueryTimes, 99),
+    minDbMs: min(perQueryTimes),
+    maxDbMs: max(perQueryTimes),
+    stddevDbMs: stddev(perQueryTimes),
     avgPerQueryMs: average(perQueryTimes),
     avgRawDbMs: average(rawServerTimes),
     avgRawPerQueryMs: average(rawPerQueryTimes),
@@ -941,13 +944,6 @@ function summarizePlacement({ raw, database, placement, requests, minSuccessfulR
     d1Regions,
     d1Colos
   };
-}
-
-function adjustedTotalMs(body) {
-  if (isFiniteNumber(body?.totalNetworkMs)) return body.totalNetworkMs;
-  const adjusted = adjustedPerQueryMs(body);
-  if (adjusted.length > 0) return adjusted.reduce((sum, value) => sum + value, 0);
-  return body?.totalMs;
 }
 
 function adjustedPerQueryMs(body) {
@@ -1121,7 +1117,7 @@ function printSummary(summary, resultsDir) {
     const row = entry.ranked.find((item) => item.status === "ok");
     if (row) {
       console.log(
-        `${entry.database.label}: ${row.placement} p95=${formatMs(row.p95DbMs)} avg=${formatMs(row.avgDbMs)} successful=${row.successCount}/${row.requestCount} errors=${row.errorCount}`
+        `${entry.database.label}: ${row.placement} ${DEFAULT_AGGREGATE_METRIC}=${formatMs(row[DEFAULT_AGGREGATE_FIELD])} avg=${formatMs(row.avgDbMs)} successful=${row.successCount}/${row.requestCount} errors=${row.errorCount}`
       );
     } else {
       console.log(`${entry.database.label}: no successful requests`);
