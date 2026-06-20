@@ -532,6 +532,11 @@ a:hover { text-decoration: underline; }
   margin-right: 9px; border-radius: 4px; background: var(--panel-2); overflow: hidden;
 }
 .raw-net-fill { display: block; height: 100%; border-radius: 4px; }
+.barrow .fill.over,
+.raw-net-fill.over {
+  background-color: var(--bad);
+  background-image: repeating-linear-gradient(45deg, rgba(0,0,0,.22) 0 7px, rgba(0,0,0,0) 7px 14px);
+}
 .raw-net-num {
   display: inline-block; min-width: 3.5ch; text-align: right; vertical-align: middle;
   font-variant-numeric: tabular-nums; font-weight: 600;
@@ -609,8 +614,6 @@ table.matrix th.rowhead { text-align: left; }
 .barrow .track { background: var(--panel-2); border-radius: 6px; height: 22px; overflow: hidden; }
 .barrow .fill { height: 100%; border-radius: 6px; }
 .barrow .fill.over {
-  background-color: var(--bad);
-  background-image: repeating-linear-gradient(45deg, rgba(0,0,0,.22) 0 7px, rgba(0,0,0,0) 7px 14px);
   display: flex; align-items: center; justify-content: flex-end; padding-right: 9px;
 }
 .over-label { font-size: 9.5px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; color: #fff; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,.35); }

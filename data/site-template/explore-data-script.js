@@ -6,7 +6,7 @@ const state = {
   filters: {},
   rowMode: "pair",
   metric: "p95",
-  sort: "index",
+  sort: "networkMs",
   dir: 1,
   expandedProviders: [],
 };
@@ -21,7 +21,6 @@ const esc = Site.escapeHtml;
 const lerpColor = Site.latencyColor;
 
 function fmtMsValue(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
-const OVER_COLOR = "#e5534b";
 // Global latency scale over the whole (unfiltered) dataset for the current row mode and
 // metric, so cell colors stay comparable no matter which filters are selected. The upper
 // bound is capped at the Tukey fence (q3 + 1.5·IQR) so a few outliers don't flatten the range.
@@ -39,9 +38,11 @@ function networkScale() {
 function netCell(v, scale) {
   if (v == null) return '<span class="raw-net-num muted">—</span>';
   const over = v > scale.max;
-  const col = over ? OVER_COLOR : lerpColor((v - scale.min) / scale.span);
-  const width = over ? 100 : Math.max(2, (v / scale.max) * 100);
-  return '<span class="raw-net-bar"><span class="raw-net-fill" style="width:' + width.toFixed(1) + '%;background:' + col + '"></span></span>' +
+  const fillStyle = over
+    ? 'width:100%'
+    : 'width:' + Math.max(2, (v / scale.max) * 100).toFixed(1) + '%;background:' + lerpColor((v - scale.min) / scale.span);
+  return '<span class="raw-net-bar"><span class="raw-net-fill' + (over ? " over" : "") + '" style="' + fillStyle + '"' +
+    (over ? ' title="off scale (above ' + fmtMsValue(scale.max) + ' ms)"' : '') + '></span></span>' +
     '<span class="raw-net-num">' + fmtMsValue(v) + '</span>';
 }
 function labelValue(v) { return v == null || v === "" ? "(none)" : String(v); }
