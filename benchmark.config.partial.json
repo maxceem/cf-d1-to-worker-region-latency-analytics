@@ -23,6 +23,7 @@
   "benchmark": {
     "warmupRequests": 2,
     "measuredRequests": 5,
+    "minSuccessfulRequests": 3,
     "queriesPerRequest": 3,
     "requestTimeoutMs": 30000
   },

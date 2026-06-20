@@ -6,15 +6,23 @@
 // Usage:
 //   node ./src/build-html-site.mjs [--input results/raw.json] [--output docs/index.html]
 //
-// Defaults: reads results/raw.json (falling back to results-partial/raw.json) and
-// writes docs/index.html.
+// Defaults: reads the newest available raw.json and writes docs/index.html.
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  getMinSuccessfulRequests,
+  getPairMeasurements,
+  isPairReliable
+} from "./placement-eligibility.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const require = createRequire(import.meta.url);
+const MetricStats = require("./metric-stats.cjs");
+const { average, isFiniteNumber, numberOrNull } = MetricStats;
 
 // Public repository URL shown in the report's "Source" link. Update before deploy.
 const REPO_URL = "https://github.com/maxceem/cf-d1-to-worker-region-latency-analytics";
@@ -34,23 +42,38 @@ async function main() {
 
   const inputPath = await resolveInputPath(args.input);
   const raw = JSON.parse(await readFile(inputPath, "utf8"));
-  const model = buildModel(raw);
-  const [basemap, d1LocationCoordinates, providerRegionCoordinates] = await Promise.all([
+  const [basemap, d1LocationCoordinates, providerRegionCoordinates, workerColoCoordinates] = await Promise.all([
     readJson("data/world-basemap.json"),
     readJson("data/d1-location-coordinates.json"),
     readJson("data/provider-region-coordinates.json"),
+    readJson("data/worker-colo-coordinates.json"),
   ]);
+  const model = buildModel(raw, { providerRegionCoordinates, workerColoCoordinates });
   model.basemap = basemap;
   model.d1coords = d1LocationCoordinates;
   model.coords = providerRegionCoordinates;
   model.repoUrl = REPO_URL;
+  const exploreDataModel = buildRawModel(raw, { providerRegionCoordinates, workerColoCoordinates });
+  exploreDataModel.repoUrl = REPO_URL;
 
   const outputPath = resolvePath(args.output || DEFAULT_OUTPUT_PATH);
-  const html = await renderHtml(model);
+  const exploreDataOutputPath = resolve(dirname(outputPath), "explore-data.html");
+  const html = await renderHtml(model, {
+    scriptName: "script.js",
+    title: "Cloudflare D1-to-Worker Latency Analytics",
+    page: "overview"
+  });
+  const exploreDataHtml = await renderHtml(exploreDataModel, {
+    scriptName: "explore-data-script.js",
+    title: "Explore Data | Cloudflare D1-to-Worker Latency Analytics",
+    page: "explore-data"
+  });
   await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, html, "utf8");
+  await writeFile(exploreDataOutputPath, exploreDataHtml, "utf8");
 
   console.log(`Wrote ${outputPath}`);
+  console.log(`Wrote ${exploreDataOutputPath}`);
   console.log(
     `D1 regions: ${model.databases.length} | Worker placements: ${model.placements.length} | pairs: ${model.pairs.length}`
   );
@@ -101,7 +124,7 @@ Usage:
   node ./src/build-html-site.mjs [--input <raw.json>] [--output <docs/index.html>]
 
 Options:
-  -i, --input   Path to raw.json (default: results/raw.json, else results-partial/raw.json)
+  -i, --input   Path to raw.json (default: newest of results/raw.json and results-partial/raw.json)
   -o, --output  Path to write the HTML file (default: docs/index.html)
       --no-open Do not open the generated site in a browser
   -h, --help    Show this help`);
@@ -109,14 +132,19 @@ Options:
 
 async function resolveInputPath(explicit) {
   if (explicit) return resolvePath(explicit);
-  for (const candidate of ["results/raw.json", "results-partial/raw.json"]) {
-    const full = resolvePath(candidate);
+  const candidates = [];
+  for (const relativePath of ["results/raw.json", "results-partial/raw.json"]) {
+    const full = resolvePath(relativePath);
     try {
-      await readFile(full);
-      return full;
+      const info = await stat(full);
+      candidates.push({ full, mtimeMs: info.mtimeMs });
     } catch {
       // try next
     }
+  }
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0].full;
   }
   // Default to results/raw.json so the error message is sensible.
   return resolvePath("results/raw.json");
@@ -134,8 +162,9 @@ async function readJson(path) {
 // Model: turn raw measurements into per-pair statistics the page can render.
 // ---------------------------------------------------------------------------
 
-function buildModel(raw) {
+function buildModel(raw, { providerRegionCoordinates, workerColoCoordinates }) {
   const run = raw.run || {};
+  const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
   const databases = (raw.databases || []).map((db) => ({
     key: db.key,
     label: db.label || db.key,
@@ -151,13 +180,17 @@ function buildModel(raw) {
     const byPlacement = measured[db.key] || {};
     for (const placement of placements) {
       const requests = byPlacement[placement] || [];
-      pairs.push(summarizePair(db, placement, requests));
+      pairs.push(summarizePair(db, placement, requests, {
+        providerRegionCoordinates,
+        workerColoCoordinates,
+        minSuccessfulRequests
+      }));
     }
   }
 
   // Global ranking across every D1 x Worker pair.
   const ranked = pairs
-    .filter((p) => p.successCount > 0)
+    .filter((p) => p.status === "ok")
     .sort((a, b) => compareNullable(a.p95, b.p95) || compareNullable(a.avg, b.avg));
   const best = ranked[0] || null;
 
@@ -170,6 +203,7 @@ function buildModel(raw) {
       accountId: run.accountId || null,
       warnings: run.warnings || [],
       benchmark: serializeBenchmarkConfig(run.config && run.config.benchmark),
+      minSuccessfulRequests,
     },
     databases,
     placements,
@@ -178,29 +212,132 @@ function buildModel(raw) {
   };
 }
 
+function buildRawModel(raw, { providerRegionCoordinates, workerColoCoordinates }) {
+  const run = raw.run || {};
+  const databases = (raw.databases || []).map((db) => ({
+    key: db.key,
+    label: db.label || db.key,
+    targetLocation: db.targetLocation || null,
+    observedRegion: db.observedRegion || null,
+  }));
+  const databaseByKey = Object.fromEntries(databases.map((db) => [db.key, db]));
+  const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
+  const rows = [];
+
+  for (const [dbKey, byPlacement] of Object.entries(raw.measured || {})) {
+    const db = databaseByKey[dbKey];
+    if (!db) continue;
+    for (const [placement, requests] of Object.entries(byPlacement || {})) {
+      const measurements = getPairMeasurements({ requests, database: db, placement, providerRegionCoordinates, workerColoCoordinates });
+      requests.forEach((request, requestIndex) => {
+        rows.push(...rawQueryRows({ db, placement, request, requestIndex, measurements }));
+      });
+    }
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    run: {
+      id: run.id || null,
+      startedAt: run.startedAt || null,
+      completedAt: run.completedAt || null,
+      benchmark: serializeBenchmarkConfig(run.config && run.config.benchmark),
+      minSuccessfulRequests,
+    },
+    databases,
+    placements: raw.workerPlacements || [],
+    rows,
+  };
+}
+
+function rawQueryRows({ db, placement, request, requestIndex, measurements }) {
+  const body = request?.body || {};
+  const ok = !!request?.ok && !!request?.body;
+  const notes = measurements.notes.get(request) || (ok ? [] : ["failed"]);
+  const status = ok ? "ok" : "failed";
+  const adjusted = ok ? adjustedTotalMs(body) : null;
+  const perQuery = ok ? adjustedPerQueryMs(body) : [];
+  const queryValues = perQuery
+    .map((value, queryIndex) => ({ value, queryIndex }))
+    .filter((entry) => isFiniteNumber(entry.value));
+  const rows = queryValues.length ? queryValues : [{ value: adjusted, queryIndex: null }];
+
+  return rows.map(({ value, queryIndex }) => ({
+    id: `${db.key}|${placement}|${requestIndex}|${queryIndex == null ? "request" : queryIndex}`,
+    dbKey: db.key,
+    dbLabel: db.observedRegion || db.label,
+    d1TargetLocation: db.targetLocation,
+    d1ObservedRegion: db.observedRegion,
+    placement,
+    requestIndex,
+    queryIndex,
+    queryPosition: queryIndex == null ? "request" : queryIndex === 0 ? "first" : "later",
+    status,
+    note: notes.join(", ") || null,
+    notes,
+    measuredQueryCount: isFiniteNumber(value) ? 1 : 0,
+    httpStatus: request?.status || 0,
+    clientMs: numberOrNull(request?.clientMs),
+    workerColo: body.workerColo || null,
+    placementHeader: request?.placementHeader || null,
+    placementMode: request?.placementMode || null,
+    placementColo: request?.placementColo || null,
+    totalMs: numberOrNull(body.totalMs),
+    networkMs: numberOrNull(value),
+    requestNetworkMs: numberOrNull(adjusted),
+    queries: Number.isFinite(body.queries) ? body.queries : null,
+    d1Region: queryLocationValue(body.d1?.regions, queryIndex),
+    d1Colo: queryLocationValue(body.d1?.colos, queryIndex),
+    d1Regions: body.d1?.regions || {},
+    d1Colos: body.d1?.colos || {},
+    sqlMs: average((body.d1?.sqlDurations || []).filter(isFiniteNumber)),
+    error: request?.error || null,
+  }));
+}
+
+function queryLocationValue(counts, queryIndex) {
+  const entries = Object.entries(counts || {});
+  if (!entries.length) return null;
+  if (entries.length === 1) return entries[0][0];
+  if (queryIndex != null) {
+    let offset = queryIndex;
+    for (const [value, count] of entries) {
+      offset -= count;
+      if (offset < 0) return value;
+    }
+  }
+  return entries.map(([value]) => value).join("+");
+}
+
 function serializeBenchmarkConfig(benchmark) {
   if (!benchmark || typeof benchmark !== "object" || Array.isArray(benchmark)) return null;
   return {
     warmupRequests: benchmark.warmupRequests,
     measuredRequests: benchmark.measuredRequests,
+    minSuccessfulRequests: benchmark.minSuccessfulRequests,
     queriesPerRequest: benchmark.queriesPerRequest,
     requestTimeoutMs: benchmark.requestTimeoutMs,
   };
 }
 
-function summarizePair(db, placement, requests) {
-  const ok = requests.filter((r) => r && r.ok && r.body);
-  const totals = ok.map((r) => adjustedTotalMs(r.body)).filter(isFiniteNumber);
-  const rawTotals = ok.map((r) => r.body.totalMs).filter(isFiniteNumber);
-  const perQuery = ok.flatMap((r) => adjustedPerQueryMs(r.body)).filter(isFiniteNumber);
-  const rawPerQuery = ok.flatMap((r) => r.body.perQueryMs || []).filter(isFiniteNumber);
-  const sqlDurations = ok
+function summarizePair(db, placement, requests, { providerRegionCoordinates, workerColoCoordinates, minSuccessfulRequests }) {
+  const measurements = getPairMeasurements({ requests, database: db, placement, providerRegionCoordinates, workerColoCoordinates });
+  const successful = measurements.successful;
+  const reliable = isPairReliable(successful.length, minSuccessfulRequests);
+  const rawTotals = reliable ? successful.map((r) => r.body.totalMs).filter(isFiniteNumber) : [];
+  const perQuery = reliable ? successful.flatMap((r) => adjustedPerQueryMs(r.body)).filter(isFiniteNumber) : [];
+  const rawPerQuery = reliable ? successful.flatMap((r) => r.body.perQueryMs || []).filter(isFiniteNumber) : [];
+  const sqlDurations = reliable ? successful
     .flatMap((r) => (r.body.d1 && r.body.d1.sqlDurations) || [])
-    .filter(isFiniteNumber);
+    .filter(isFiniteNumber) : [];
+  const metricStats = reliable
+    ? MetricStats.twoStepMetricStats(successful.map((request) => adjustedPerQueryMs(request.body)))
+    : MetricStats.emptyMetricStats();
 
-  const workerColos = mergeCounts(ok.map((r) => ({ [r.body.workerColo]: 1 })));
-  const d1Regions = mergeCounts(ok.map((r) => (r.body.d1 && r.body.d1.regions) || {}));
-  const d1Colos = mergeCounts(ok.map((r) => (r.body.d1 && r.body.d1.colos) || {}));
+  const workerColos = mergeCounts(successful.map((r) => ({ [r.body.workerColo]: 1 })));
+  const placementColos = mergeCounts(successful.map((r) => ({ [r.placementColo]: 1 })));
+  const d1Regions = mergeCounts(successful.map((r) => (r.body.d1 && r.body.d1.regions) || {}));
+  const d1Colos = mergeCounts(successful.map((r) => (r.body.d1 && r.body.d1.colos) || {}));
 
   return {
     dbKey: db.key,
@@ -208,20 +345,26 @@ function summarizePair(db, placement, requests) {
     dbObservedRegion: db.observedRegion,
     placement,
     requestCount: requests.length,
-    successCount: ok.length,
-    errorCount: requests.length - ok.length,
-    avg: average(totals),
-    p50: percentile(totals, 50),
-    p90: percentile(totals, 90),
-    p95: percentile(totals, 95),
-    p99: percentile(totals, 99),
-    min: min(totals),
-    max: max(totals),
-    stddev: stddev(totals),
-    avgPerQuery: average(perQuery),
+    httpSuccessCount: successful.length,
+    successCount: successful.length,
+    noteCounts: measurements.noteCounts,
+    minSuccessfulRequests,
+    successRatio: requests.length ? successful.length / requests.length : 0,
+    status: reliable ? "ok" : "failed",
+    errorCount: measurements.failed.length,
+    avg: metricStats.avg,
+    p50: metricStats.p50,
+    p90: metricStats.p90,
+    p95: metricStats.p95,
+    p99: metricStats.p99,
+    min: metricStats.min,
+    max: metricStats.max,
+    stddev: metricStats.stddev,
+    measuredQueryCount: perQuery.length,
     avgRaw: average(rawTotals),
     avgRawPerQuery: average(rawPerQuery),
     avgSqlMs: average(sqlDurations),
+    placementColos,
     workerColos,
     d1Regions,
     d1Colos,
@@ -248,43 +391,6 @@ function adjustedPerQueryMs(body) {
   });
 }
 
-// --- stats helpers (kept in parity with run-benchmark.mjs) ------------------
-
-function isFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function percentile(values, p) {
-  const sorted = values.filter(isFiniteNumber).sort((a, b) => a - b);
-  if (sorted.length === 0) return null;
-  const index = Math.ceil((p / 100) * sorted.length) - 1;
-  return sorted[Math.max(0, Math.min(sorted.length - 1, index))];
-}
-
-function average(values) {
-  const valid = values.filter(isFiniteNumber);
-  if (valid.length === 0) return null;
-  return valid.reduce((sum, value) => sum + value, 0) / valid.length;
-}
-
-function stddev(values) {
-  const valid = values.filter(isFiniteNumber);
-  if (valid.length < 2) return 0;
-  const avg = average(valid);
-  const variance = valid.reduce((sum, value) => sum + (value - avg) ** 2, 0) / (valid.length - 1);
-  return Math.sqrt(variance);
-}
-
-function min(values) {
-  const valid = values.filter(isFiniteNumber);
-  return valid.length ? Math.min(...valid) : null;
-}
-
-function max(values) {
-  const valid = values.filter(isFiniteNumber);
-  return valid.length ? Math.max(...valid) : null;
-}
-
 function compareNullable(a, b) {
   if (a === null && b === null) return 0;
   if (a === null) return 1;
@@ -309,20 +415,41 @@ function mergeCounts(objects) {
 
 const TEMPLATE_DIR = resolve(rootDir, "data/site-template");
 
-async function renderHtml(model) {
-  const [template, style, script] = await Promise.all([
+async function renderHtml(model, { scriptName, title, page }) {
+  const [template, style, metricStatsScript, script, clusterizeScript] = await Promise.all([
     readFile(resolve(TEMPLATE_DIR, "index.html"), "utf8"),
     readFile(resolve(TEMPLATE_DIR, "style.css"), "utf8"),
-    readFile(resolve(TEMPLATE_DIR, "script.js"), "utf8"),
+    readFile(resolve(rootDir, "src/metric-stats.cjs"), "utf8"),
+    readFile(resolve(TEMPLATE_DIR, scriptName), "utf8"),
+    page === "explore-data" ? readFile(resolve(rootDir, "node_modules/clusterize.js/clusterize.min.js"), "utf8") : Promise.resolve(""),
   ]);
   const dataJson = JSON.stringify(model).replace(/</g, "\\u003c");
+  const bundledScript = [
+    browserMetricStatsScript(metricStatsScript),
+    page === "explore-data" ? clusterizeScript.trimEnd() : "",
+    script.trimEnd(),
+  ].filter(Boolean).join("\n");
 
   return fillTemplate(template, {
+    title: escapeHtml(title),
     dataJson,
     repoUrl: escapeHtmlAttr(REPO_URL),
-    script: "\n" + script.trimEnd() + "\n",
+    overviewHref: page === "overview" ? "#" : "index.html",
+    exploreDataHref: page === "explore-data" ? "#" : "explore-data.html",
+    overviewClass: page === "overview" ? "active" : "",
+    exploreDataClass: page === "explore-data" ? "active" : "",
+    script: "\n" + bundledScript + "\n",
     style: "\n" + style.trimEnd() + "\n",
   });
+}
+
+function browserMetricStatsScript(source) {
+  return `window.MetricStats = (() => {
+const module = { exports: {} };
+const exports = module.exports;
+${source.trimEnd()}
+return module.exports;
+})();`;
 }
 
 function fillTemplate(template, values) {
@@ -339,5 +466,13 @@ function escapeHtmlAttr(value) {
     "<": "&lt;",
     ">": "&gt;",
     '"': "&quot;",
+  })[char]);
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>]/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
   })[char]);
 }

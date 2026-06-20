@@ -6,12 +6,20 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { cleanupTrackedResources, registerResource, unregisterResource } from "./clean-resources.mjs";
+import {
+  getMinSuccessfulRequests,
+  getPairMeasurements,
+  isPairReliable,
+  parsePlacementHeader
+} from "./placement-eligibility.mjs";
 
 const VALID_D1_JURISDICTIONS = new Set(["eu", "fedramp"]);
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DATA_DIR = "data";
 const D1_LOCATIONS_FILE = "d1-locations.json";
 const DEFAULT_CONFIG_PATH = "benchmark.config.json";
+const WORKER_DEPLOY_RETRY_ATTEMPTS = 4;
+const WORKER_DEPLOY_RETRY_DELAY_MS = 5000;
 let cachedWranglerInvocation;
 let activeRunContext;
 let terminationCleanupStarted = false;
@@ -149,7 +157,7 @@ async function main() {
     rawResult.run.completedAt = new Date().toISOString();
     await writeOutputs(resultsDir, rawResult);
     await buildAndOpenSite({ config, resultsDir, rootDir });
-    const summary = buildSummary(rawResult);
+    const summary = buildSummary(rawResult, benchmarkData);
     printSummary(summary, resultsDir);
   } finally {
     await writePartialIfNeeded(resultsDir, rawResult);
@@ -303,7 +311,9 @@ async function loadBenchmarkData(rootDir) {
 
   return {
     d1Locations: unique(d1Data.locations),
-    workerPlacements: unique(workerPlacements)
+    workerPlacements: unique(workerPlacements),
+    providerRegionCoordinates: JSON.parse(await readFile(path.join(dataDir, "provider-region-coordinates.json"), "utf8")),
+    workerColoCoordinates: JSON.parse(await readFile(path.join(dataDir, "worker-colo-coordinates.json"), "utf8"))
   };
 }
 
@@ -389,6 +399,12 @@ function validateConfig(config, benchmarkData) {
     if (!Number.isInteger(config.benchmark[key]) || config.benchmark[key] < 1) {
       throw new Error(`benchmark.${key} must be a positive integer.`);
     }
+  }
+  if (!Number.isInteger(config.benchmark.minSuccessfulRequests) || config.benchmark.minSuccessfulRequests < 1) {
+    throw new Error("benchmark.minSuccessfulRequests must be a positive integer.");
+  }
+  if (config.benchmark.minSuccessfulRequests > config.benchmark.measuredRequests) {
+    throw new Error("benchmark.minSuccessfulRequests cannot be greater than benchmark.measuredRequests.");
   }
   requireBoolean(config.cleanupWorkers, "cleanupWorkers");
   if (!Number.isInteger(config.propagationSeconds) || config.propagationSeconds < 0) {
@@ -711,10 +727,7 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
 
     await writeFile(configPath, `${JSON.stringify(wranglerConfig, null, 2)}\n`, "utf8");
 
-    console.log(`Deploying ${workerName} (${placement})...`);
-    const deployOutput = await runWrangler(["deploy", "--config", configPath, "--minify"], {
-      CLOUDFLARE_ACCOUNT_ID: accountId
-    });
+    const deployOutput = await deployWorkerWithRetry(workerName, placement, configPath, accountId);
     deployedWorkers.push(workerName);
     const url = extractWorkersDevUrl(deployOutput);
     if (!url) {
@@ -732,6 +745,30 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
   }
 
   return workers;
+}
+
+async function deployWorkerWithRetry(workerName, placement, configPath, accountId) {
+  for (let attempt = 1; attempt <= WORKER_DEPLOY_RETRY_ATTEMPTS; attempt += 1) {
+    console.log(`Deploying ${workerName} (${placement})...`);
+    try {
+      return await runWrangler(["deploy", "--config", configPath, "--minify"], {
+        CLOUDFLARE_ACCOUNT_ID: accountId
+      });
+    } catch (error) {
+      if (attempt >= WORKER_DEPLOY_RETRY_ATTEMPTS || !isRetryableWorkerDeployError(error)) {
+        throw error;
+      }
+      console.warn(
+        `Worker deploy failed while Cloudflare prepared bindings; retrying in ${Math.round(WORKER_DEPLOY_RETRY_DELAY_MS / 1000)}s (${attempt + 1}/${WORKER_DEPLOY_RETRY_ATTEMPTS})...`
+      );
+      await sleep(WORKER_DEPLOY_RETRY_DELAY_MS);
+    }
+  }
+}
+
+function isRetryableWorkerDeployError(error) {
+  const text = `${error?.message || ""}\n${error?.stdout || ""}\n${error?.stderr || ""}`;
+  return /binding\s+\S+\s+of type d1 failed to generate/i.test(text) || /\bcode:\s*10021\b/i.test(text);
 }
 
 async function copyWorkerSource(rootDir, tempDir) {
@@ -762,6 +799,8 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
   try {
     const response = await fetch(url, { signal: controller.signal });
     const clientMs = performance.now() - started;
+    const placementHeader = response.headers.get("cf-placement");
+    const placement = parsePlacementHeader(placementHeader);
     const text = await response.text();
     let body;
     try {
@@ -775,6 +814,9 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
         ok: false,
         status: response.status,
         clientMs,
+        placementHeader,
+        placementMode: placement.placementMode,
+        placementColo: placement.placementColo,
         error: body?.error || `HTTP ${response.status}`,
         body
       };
@@ -784,6 +826,9 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
       ok: true,
       status: response.status,
       clientMs,
+      placementHeader,
+      placementMode: placement.placementMode,
+      placementColo: placement.placementColo,
       body
     };
   } catch (error) {
@@ -798,15 +843,24 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
   }
 }
 
-function buildSummary(raw) {
+function buildSummary(raw, benchmarkData) {
   const databases = (raw.databases || [raw.database]).filter(Boolean);
   const byDatabase = {};
   const allRanked = [];
+  const minSuccessfulRequests = getMinSuccessfulRequests(raw.run?.config);
 
   for (const database of databases) {
     const measured = raw.measured?.[database.key] || {};
     const placements = Object.entries(measured).map(([placement, requests]) =>
-      summarizePlacement({ raw, database, placement, requests })
+      summarizePlacement({
+        raw,
+        database,
+        placement,
+        requests,
+        providerRegionCoordinates: benchmarkData.providerRegionCoordinates,
+        workerColoCoordinates: benchmarkData.workerColoCoordinates,
+        minSuccessfulRequests
+      })
     );
     const ranked = placements
       .slice()
@@ -817,15 +871,15 @@ function buildSummary(raw) {
       database,
       placements,
       ranked,
-      recommendation: ranked.find((item) => item.successCount > 0)
-        ? `Use ${ranked.find((item) => item.successCount > 0).placement} for D1 ${database.label} based on the lowest p95 latency in this run.`
+      recommendation: ranked.find((item) => item.status === "ok")
+        ? `Use ${ranked.find((item) => item.status === "ok").placement} for D1 ${database.label} based on the lowest p95 latency in this run.`
         : `No successful benchmark requests were recorded for D1 ${database.label}.`
     };
     allRanked.push(...ranked.map((item) => ({ ...item, databaseKey: database.key, databaseLabel: database.label })));
   }
 
   const best = allRanked
-    .filter((item) => item.successCount > 0)
+    .filter((item) => item.status === "ok")
     .sort((a, b) => compareNullable(a.p95DbMs, b.p95DbMs) || compareNullable(a.avgDbMs, b.avgDbMs))[0];
 
   return {
@@ -839,15 +893,19 @@ function buildSummary(raw) {
   };
 }
 
-function summarizePlacement({ raw, database, placement, requests }) {
-  const successes = requests.filter((request) => request.ok);
-  const errors = requests.filter((request) => !request.ok);
-  const serverTimes = successes.map((request) => adjustedTotalMs(request.body)).filter(isFiniteNumber);
-  const rawServerTimes = successes.map((request) => request.body?.totalMs).filter(isFiniteNumber);
-  const perQueryTimes = successes.flatMap((request) => adjustedPerQueryMs(request.body)).filter(isFiniteNumber);
-  const rawPerQueryTimes = successes.flatMap((request) => request.body?.perQueryMs ?? []).filter(isFiniteNumber);
-  const sqlDurations = successes.flatMap((request) => request.body?.d1?.sqlDurations ?? []).filter(isFiniteNumber);
+function summarizePlacement({ raw, database, placement, requests, providerRegionCoordinates, workerColoCoordinates, minSuccessfulRequests }) {
+  const successes = requests.filter((request) => request && request.ok);
+  const errors = requests.filter((request) => !request?.ok);
+  const measurements = getPairMeasurements({ requests, database, placement, providerRegionCoordinates, workerColoCoordinates });
+  const successful = measurements.successful;
+  const reliable = isPairReliable(successful.length, minSuccessfulRequests);
+  const serverTimes = reliable ? successful.map((request) => adjustedTotalMs(request.body)).filter(isFiniteNumber) : [];
+  const rawServerTimes = reliable ? successful.map((request) => request.body?.totalMs).filter(isFiniteNumber) : [];
+  const perQueryTimes = reliable ? successful.flatMap((request) => adjustedPerQueryMs(request.body)).filter(isFiniteNumber) : [];
+  const rawPerQueryTimes = reliable ? successful.flatMap((request) => request.body?.perQueryMs ?? []).filter(isFiniteNumber) : [];
+  const sqlDurations = reliable ? successful.flatMap((request) => request.body?.d1?.sqlDurations ?? []).filter(isFiniteNumber) : [];
   const workerColos = countValues(successes.map((request) => request.body?.workerColo).filter(Boolean));
+  const placementColos = countValues(successes.map((request) => request.placementColo).filter(Boolean));
   const d1Regions = mergeCounts(successes.map((request) => request.body?.d1?.regions));
   const d1Colos = mergeCounts(successes.map((request) => request.body?.d1?.colos));
   const worker = findWorker(raw, placement);
@@ -862,7 +920,12 @@ function summarizePlacement({ raw, database, placement, requests }) {
     workerName: worker?.name,
     url: worker?.url,
     requestCount: requests.length,
-    successCount: successes.length,
+    httpSuccessCount: successes.length,
+    successCount: successful.length,
+    noteCounts: measurements.noteCounts,
+    minSuccessfulRequests,
+    successRatio: requests.length ? successful.length / requests.length : 0,
+    status: reliable ? "ok" : "failed",
     errorCount: errors.length,
     errors: summarizeErrors(errors),
     avgDbMs: average(serverTimes),
@@ -877,6 +940,7 @@ function summarizePlacement({ raw, database, placement, requests }) {
     avgRawDbMs: average(rawServerTimes),
     avgRawPerQueryMs: average(rawPerQueryTimes),
     avgD1SqlDurationMs: average(sqlDurations),
+    placementColos,
     workerColos,
     d1Regions,
     d1Colos
@@ -1058,10 +1122,10 @@ function printSummary(summary, resultsDir) {
   console.log("");
   console.log("Top ranking per D1 database:");
   for (const entry of Object.values(summary.byDatabase)) {
-    const row = entry.ranked.find((item) => item.successCount > 0);
+    const row = entry.ranked.find((item) => item.status === "ok");
     if (row) {
       console.log(
-        `${entry.database.label}: ${row.placement} p95=${formatMs(row.p95DbMs)} avg=${formatMs(row.avgDbMs)} errors=${row.errorCount}`
+        `${entry.database.label}: ${row.placement} p95=${formatMs(row.p95DbMs)} avg=${formatMs(row.avgDbMs)} successful=${row.successCount}/${row.requestCount} errors=${row.errorCount}`
       );
     } else {
       console.log(`${entry.database.label}: no successful requests`);

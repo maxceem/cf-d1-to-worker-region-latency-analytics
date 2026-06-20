@@ -11,9 +11,12 @@
     "cleanup": "node ./src/clean-resources.mjs",
     "site": "node ./src/build-html-site.mjs",
     "build:site": "node ./src/build-html-site.mjs --no-open",
-    "check": "node --check ./src/run-benchmark.mjs && node --check ./src/benchmark-worker-source.mjs && node --check ./src/clean-resources.mjs && node --check ./src/build-html-site.mjs"
+    "check": "node --check ./src/run-benchmark.mjs && node --check ./src/benchmark-worker-source.mjs && node --check ./src/clean-resources.mjs && node --check ./src/build-html-site.mjs && node --check ./src/metric-stats.cjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "clusterize.js": "^1.0.0"
   }
 }

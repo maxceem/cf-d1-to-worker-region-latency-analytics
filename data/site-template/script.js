@@ -1,14 +1,6 @@
 "use strict";
 const MODEL = JSON.parse(document.getElementById("report-data").textContent);
-const METRICS = [
-  { key: "avg", label: "Average" },
-  { key: "p50", label: "p50 (median)" },
-  { key: "p90", label: "p90" },
-  { key: "p95", label: "p95" },
-  { key: "p99", label: "p99" },
-  { key: "min", label: "Min" },
-  { key: "max", label: "Max" },
-];
+const METRICS = window.MetricStats.METRICS;
 const state = { db: (MODEL.databases[0] && MODEL.databases[0].key) || "all",
   metric: "p95", sort: "metric", dir: 1, matrixSort: "p95", matrixDir: 1, regionView: "list",
   heroM: { 1: "p95", 2: "p95", 3: "p95", 4: "p95", 5: "p95",
@@ -79,8 +71,8 @@ function header() {
     '<h2 class="why">Why it matters</h2>' +
     '<div class="intro">' +
       '<div class="intro-text">' +
-        '<p class="sub">When a user calls a Cloudflare Worker that queries a D1 database, D1 round trips can add ' +
-          'latency to the final response, especially when a request runs multiple sequential D1 queries.</p>' +
+        '<p class="sub">When a user calls a Cloudflare Worker that queries a D1 database, each D1 round trip can add ' +
+          'latency to the final response.</p>' +
         '<p class="idea-cap">This benchmark measures the latency between D1 and a Worker when that Worker is pinned ' +
           'to a specific third-party cloud region, such as AWS, GCP, or Azure, using Cloudflare ' +
           '<a href="https://developers.cloudflare.com/workers/configuration/placement/#specify-a-cloud-region" target="_blank" rel="noopener"><code>region</code> placement configuration</a>.</p>' +
@@ -159,6 +151,8 @@ function metaFooter() {
     ? b.measuredRequests
     : Math.max.apply(null, MODEL.pairs.map(p => p.requestCount || 0).concat(0));
   const totalReq = MODEL.pairs.length * measured;
+  const successfulReq = MODEL.pairs.reduce((sum, p) => sum + (p.successCount || 0), 0);
+  const failedReq = MODEL.pairs.reduce((sum, p) => sum + (p.errorCount || 0), 0);
   const row = (k, v, cls) => '<tr><th scope="row">' + k + '</th><td' +
     (cls ? ' class="' + cls + '"' : '') + '>' + v + '</td></tr>';
   const rows =
@@ -168,16 +162,18 @@ function metaFooter() {
     row("Worker locations", num(MODEL.placements.length)) +
     row("Pairs tested", num(MODEL.pairs.length)) +
     row("Requests per pairing", num(measured)) +
+    row("Minimum successful requests", num(b.minSuccessfulRequests || r.minSuccessfulRequests)) +
     row("Queries per request", num(b.queriesPerRequest)) +
     row("Warm-up per pairing", num(b.warmupRequests)) +
     row("Request timeout", b.requestTimeoutMs != null ? Math.round(b.requestTimeoutMs / 1000) + " s" : "—") +
-    row("Total measured requests", num(totalReq));
+    row("Total measured requests", num(totalReq)) +
+    row("Successful measured requests", num(successfulReq) + (failedReq ? " successful, " + num(failedReq) + " failed" : ""));
   return '<section class="details">' +
     '<h2>How this was measured</h2>' +
     '<p class="sub">Every Worker location was benchmarked against every D1 region. For each pairing we sent ' +
       num(measured) + ' timed requests' + (b.warmupRequests ? ' (after ' + num(b.warmupRequests) + ' warm-ups)' : '') +
       ', each running ' + (b.queriesPerRequest ? num(b.queriesPerRequest) + ' sequential D1 queries' : 'its D1 queries') +
-      ', and recorded the round-trip latency measured inside the Worker.</p>' +
+      ', and recorded per-query network latency measured inside the Worker. Pair metrics apply the selected metric to the queries in each request, then apply the same metric across requests.</p>' +
     '<table class="measure-table"><tbody>' + rows + '</tbody></table>' +
   '</section>';
 }
@@ -202,7 +198,7 @@ function tabsPanel() {
   }
   // Row 2: metric tabs (no "All" — one is always selected).
   let mTabs = "";
-  for (const m of METRICS.filter(x => x.key !== "avg")) {
+  for (const m of METRICS) {
     mTabs += '<button class="tab' + (state.metric === m.key ? " active" : "") + '" data-metric="' + m.key + '">' +
       esc(m.label) + '</button>';
   }
@@ -213,6 +209,8 @@ function tabsPanel() {
 }
 
 function metricVal(p) { return p[state.metric]; }
+function pairStatus(p) { return p.status === "ok" ? "OK" : "Failed"; }
+function successText(p) { return (p.successCount || 0) + "/" + (p.requestCount || 0); }
 
 // --- "Best worker regions": shared data helper + 5 concept explorations ---
 function bestPerDb(metricKey) {
@@ -242,9 +240,9 @@ function heroRange(entries) {
 function heroTabs(ver, cls) {
   const sel = state.heroM[ver];
   let t = "";
-  for (const m of METRICS.filter(x => x.key !== "avg")) {
+  for (const m of METRICS) {
     t += '<button class="' + cls + (sel === m.key ? " on" : "") + '" data-herov="' + ver +
-      '" data-herok="' + m.key + '">' + m.key.toUpperCase() + '</button>';
+      '" data-herok="' + m.key + '">' + esc(m.label) + '</button>';
   }
   return t;
 }
@@ -588,9 +586,9 @@ function cartoSpot(ver, schemeCls, kicker) {
 // Global metric ("P") filter pills — drives the cards and the stats below.
 function metricPills(cls) {
   let t = "";
-  for (const m of METRICS.filter(x => x.key !== "avg")) {
+  for (const m of METRICS) {
     t += '<button class="' + cls + (state.metric === m.key ? " on" : "") +
-      '" data-metric="' + m.key + '">' + m.key.toUpperCase() + '</button>';
+      '" data-metric="' + m.key + '">' + esc(m.label) + '</button>';
   }
   return t;
 }
@@ -601,8 +599,7 @@ function heroV15() { return cartoSpot(15, "s-clay", "15 ◵ Clay"); }
 
 function matrixPanel() {
   const dbs = MODEL.databases;
-  const order = ["min", "p50", "p90", "p95", "p99", "max"];
-  const cols = order.map(k => METRICS.find(m => m.key === k)).filter(Boolean);
+  const cols = METRICS;
   // For each D1 region and each metric, find the best (lowest) value across all
   // Worker placements and remember which placement achieved it.
   const bestByDbMetric = {}; // dbKey -> metricKey -> { value, placement }
@@ -641,7 +638,7 @@ function matrixPanel() {
     });
   }
   const arrow = m => state.matrixSort === m ? (state.matrixDir === 1 ? " ▲" : " ▼") : "";
-  let head = '<tr><th class="rowhead l">D1 region ＼ Metric (ms)</th>';
+  let head = '<tr><th class="rowhead l">D1 region ＼ One-query metric (ms)</th>';
   for (const m of cols) head += '<th class="col' + (state.matrixSort === m.key ? " sorted" : "") + '" data-msort="' + m.key + '">' + esc(m.label) + arrow(m.key) + '</th>';
   head += '</tr>';
   let rows = "";
@@ -655,13 +652,13 @@ function matrixPanel() {
       const t = (best.value - r.lo) / r.span;
       const bg = lerpColor(t);
       rows += '<td class="cell' + sorted + '" style="background:' + bg + '22" title="' +
-        esc(dbLabel(d.key)) + ' — best ' + esc(m.label) + ': ' + fmt(best.value) + ' via ' + esc(best.placement) + '">' +
+        esc(dbLabel(d.key)) + ' — best one-query ' + esc(m.label) + ': ' + fmt(best.value) + ' via ' + esc(best.placement) + '">' +
         '<span class="v" style="color:' + bg + '">' + fmtNum(best.value) + '</span>' +
         '<span class="loc">' + esc(best.placement) + '</span></td>';
     }
     rows += '</tr>';
   }
-  return '<h2>Best latency per D1 region</h2>' +
+  return '<h2>Best one-query latency per D1 region</h2>' +
     '<div class="panel nopad">' +
       '<div class="matrix-scroll"><table class="matrix"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>' +
     '</div>';
@@ -669,6 +666,9 @@ function matrixPanel() {
 
 function metricLabel() {
   return (METRICS.find(m => m.key === state.metric) || {}).label || state.metric;
+}
+function queryMetricLabel() {
+  return metricLabel() + " / query";
 }
 
 function sortedPairs(pairs) {
@@ -678,6 +678,7 @@ function sortedPairs(pairs) {
     let av, bv;
     if (key === "db") { av = dbLabel(a.dbKey); bv = dbLabel(b.dbKey); return av.localeCompare(bv) * dir; }
     if (key === "placement") return a.placement.localeCompare(b.placement) * dir;
+    if (key === "status") return pairStatus(a).localeCompare(pairStatus(b)) * dir;
     if (key === "metric") { av = metricVal(a); bv = metricVal(b); }
     else { av = a[key]; bv = b[key]; }
     if (av == null && bv == null) return 0;
@@ -699,12 +700,13 @@ function globalTablePanel() {
   const cols = [
     { key: "db", label: "D1 region", l: true },
     { key: "placement", label: "Worker location", l: true },
-    { key: "metric", label: metricLabel() },
-    { key: "avg", label: "Avg" },
-    { key: "p50", label: "p50" },
-    { key: "p95", label: "p95" },
-    { key: "p99", label: "p99" },
-    { key: "avgPerQuery", label: "Avg/query" },
+    { key: "metric", label: queryMetricLabel() },
+    { key: "avg", label: "Avg/q" },
+    { key: "p50", label: "p50/q" },
+    { key: "p95", label: "p95/q" },
+    { key: "p99", label: "p99/q" },
+    { key: "successCount", label: "Successful" },
+    { key: "status", label: "Status" },
     { key: "errorCount", label: "Errors" },
   ];
   const pairs = sortedPairs(MODEL.pairs);
@@ -712,7 +714,7 @@ function globalTablePanel() {
   let rows = "";
   for (const p of pairs) {
     const isBest = bestKey === p.dbKey + "|" + p.placement;
-    rows += '<tr class="' + (isBest ? "best" : "") + '">' +
+    rows += '<tr class="' + (isBest ? "best" : "") + (p.status === "failed" ? " failed" : "") + '">' +
       '<td class="l"><span class="tag d1">' + esc(dbLabel(p.dbKey)) + '</span></td>' +
       '<td class="l"><span class="tag wk">' + esc(p.placement) + '</span>' + (isBest ? ' <span class="tag win">best</span>' : '') + '</td>' +
       '<td class="metric">' + fmt(metricVal(p)) + '</td>' +
@@ -720,12 +722,13 @@ function globalTablePanel() {
       '<td>' + fmt(p.p50) + '</td>' +
       '<td>' + fmt(p.p95) + '</td>' +
       '<td>' + fmt(p.p99) + '</td>' +
-      '<td>' + fmt(p.avgPerQuery) + '</td>' +
+      '<td title="successful / measured">' + successText(p) + '</td>' +
+      '<td><span class="tag ' + (p.status === "ok" ? "ok" : "fail") + '">' + pairStatus(p) + '</span></td>' +
       '<td class="' + (p.errorCount ? "" : "muted") + '">' + p.errorCount + '</td>' +
     '</tr>';
   }
-  if (!rows) rows = '<tr><td colspan="9" class="empty">No successful measurements.</td></tr>';
-  return '<h2>All pairs ranked</h2>' +
+  if (!rows) rows = '<tr><td colspan="10" class="empty">No successful measurements.</td></tr>';
+  return '<h2>All pairs ranked by one-query latency</h2>' +
     '<div class="panel"><table id="ptable"><thead>' + tableHead(cols) + '</thead><tbody>' + rows + '</tbody></table></div>';
 }
 
