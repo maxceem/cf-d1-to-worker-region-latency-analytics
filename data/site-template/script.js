@@ -28,21 +28,98 @@ function arcPath(a, b) {
   return "M" + a[0].toFixed(1) + " " + a[1].toFixed(1) +
     " Q" + cx.toFixed(1) + " " + cy.toFixed(1) + " " + b[0].toFixed(1) + " " + b[1].toFixed(1);
 }
-function placeCoord(placement) {
+function sortedCountKeys(obj) {
+  return Object.entries(obj || {})
+    .filter(([key, value]) => key && Number(value) > 0)
+    .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]))
+    .map(([key]) => key);
+}
+function sortedCountEntries(obj) {
+  return Object.entries(obj || {})
+    .filter(([key, value]) => key && Number(value) > 0)
+    .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]));
+}
+function placementColoEntries(item) {
+  const entries = sortedCountEntries(item.placementColos);
+  const missing = Number((item.noteCounts || {}).placement_header_missing || 0);
+  if (missing > 0) entries.push(["-", missing]);
+  return entries.sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]));
+}
+function placementColoText(item) {
+  const names = placementColoEntries(item).map(([name]) => name);
+  return names.length ? names.join(",") : "";
+}
+function placementLabelText(item) {
+  const suffix = placementColoText(item);
+  return suffix ? item.placement + " / " + suffix : item.placement;
+}
+function placementLabelHtml(item) {
+  const suffix = placementColoText(item);
+  return suffix
+    ? esc(item.placement) + ' <span class="placement-colo">/ ' + esc(suffix) + '</span>'
+    : esc(item.placement);
+}
+function placementCoord(placement) {
   const i = placement.indexOf(":");
   if (i < 0) return null;
   const prov = placement.slice(0, i), region = placement.slice(i + 1);
   return (MODEL.coords[prov] || {})[region] || null;
+}
+function primaryPlacementColo(item) {
+  const names = sortedCountKeys(item.placementColos);
+  return names.find(name => (MODEL.coloCoords || {})[name]) || names[0] || null;
+}
+function observedPlaceCoord(item) {
+  const colo = primaryPlacementColo(item);
+  if (colo && (MODEL.coloCoords || {})[colo]) return (MODEL.coloCoords || {})[colo];
+  return placementCoord(item.placement);
+}
+function mergePairColos(target, pair) {
+  for (const [colo, count] of Object.entries(pair.placementColos || {})) {
+    target.placementColos[colo] = (target.placementColos[colo] || 0) + Number(count || 0);
+  }
+  for (const [note, count] of Object.entries(pair.noteCounts || {})) {
+    target.noteCounts[note] = (target.noteCounts[note] || 0) + Number(count || 0);
+  }
 }
 function counts(obj) {
   const e = Object.entries(obj || {});
   if (!e.length) return "—";
   return e.sort((a,b)=>b[1]-a[1]).map(([k,v]) => k + ":" + v).join(", ");
 }
+function dbRecord(key) {
+  return MODEL.databases.find(d => d.key === key) || null;
+}
+function dbRegionLabel(key) {
+  const d = dbRecord(key);
+  return d ? d.observedRegion || d.label : key;
+}
+function dbColoLabel(key) {
+  const d = dbRecord(key);
+  const colos = (d?.d1Colos || []).filter(Boolean);
+  return colos.length ? colos.join(", ") : d?.d1Colo || "";
+}
+function dbLabelText(key) {
+  const region = dbRegionLabel(key);
+  const colo = dbColoLabel(key);
+  return colo ? region + " / " + colo : region;
+}
+function dbLabelHtml(key) {
+  const region = esc(dbRegionLabel(key));
+  const colo = dbColoLabel(key);
+  return colo ? region + ' <span class="d1-colo">/ ' + esc(colo) + '</span>' : region;
+}
+function dbSvgLabel(key) {
+  const region = esc(dbRegionLabel(key));
+  const colo = dbColoLabel(key);
+  return colo ? region + '<tspan class="md1colo"> / ' + esc(colo) + '</tspan>' : region;
+}
+function dbCoord(key) {
+  const colo = dbColoLabel(key).split(",")[0].trim();
+  return colo ? (MODEL.coloCoords || {})[colo] || (MODEL.d1coords || {})[(key || "").toLowerCase()] : (MODEL.d1coords || {})[(key || "").toLowerCase()];
+}
 function dbLabel(key) {
-  const d = MODEL.databases.find(d => d.key === key);
-  if (!d) return key;
-  return d.observedRegion || d.label;
+  return dbLabelText(key);
 }
 
 function render() {
@@ -174,7 +251,7 @@ function tabsPanel() {
   let dbTabs = '<button class="tab' + (state.db === "all" ? " active" : "") + '" data-db="all">All</button>';
   for (const d of MODEL.databases) {
     dbTabs += '<button class="tab' + (state.db === d.key ? " active" : "") + '" data-db="' + esc(d.key) + '">' +
-      esc(dbLabel(d.key)) + '</button>';
+      dbLabelHtml(d.key) + '</button>';
   }
   return '<div class="tabs">' +
     '<div class="tabrow"><span class="tablabel">D1 region</span><div class="tabset">' + dbTabs + '</div></div>' +
@@ -194,9 +271,9 @@ function bestPerDb(metricKey) {
       if (p.dbKey !== d.key) continue;
       const v = p[metricKey];
       if (v == null) continue;
-      if (!best || v < best.value) best = { value: v, placement: p.placement };
+      if (!best || v < best.value) best = { value: v, placement: p.placement, pair: p };
     }
-    return { key: d.key, name: dbLabel(d.key), best: best };
+    return { key: d.key, name: dbLabelText(d.key), nameHtml: dbLabelHtml(d.key), best: best };
   });
 }
 function byBest(a, b) {
@@ -243,10 +320,10 @@ function heroV1() {
     i++;
     const num = (i < 10 ? "0" : "") + i;
     const val = e.best ? fmtNum(e.best.value) : "—";
-    const loc = e.best ? esc(e.best.placement) : "no data";
+    const loc = e.best ? placementLabelHtml(e.best.pair) : "no data";
     rows += '<div class="v1row' + (i === 1 ? " v1-lead" : "") + '">' +
       '<span class="v1rank">' + num + '</span>' +
-      '<span class="v1region">' + esc(e.name) + '</span>' +
+      '<span class="v1region">' + (e.nameHtml || esc(e.name)) + '</span>' +
       '<span class="v1loc">' + loc + '</span>' +
       '<span class="v1val">' + val + '<i>ms</i></span>' +
     '</div>';
@@ -272,9 +349,9 @@ function heroV2() {
     const pct = (e.best.value - lo) / span * 100;
     const dir = idx % 2 === 0 ? "up" : "down";
     marks += '<div class="v2mark ' + dir + '" style="left:' + pct + '%">' +
-      '<div class="v2lab"><span class="v2reg">' + esc(e.name) + '</span>' +
+      '<div class="v2lab"><span class="v2reg">' + (e.nameHtml || esc(e.name)) + '</span>' +
         '<span class="v2v">' + fmtNum(e.best.value) + '<i>ms</i></span>' +
-        '<span class="v2loc">' + esc(e.best.placement) + '</span></div>' +
+        '<span class="v2loc">' + placementLabelHtml(e.best.pair) + '</span></div>' +
       '<div class="v2stem"></div><div class="v2dot"></div>' +
     '</div>';
   });
@@ -294,15 +371,15 @@ function heroV3() {
   const lead = entries[0];
   let rest = "";
   for (const e of entries.slice(1)) {
-    rest += '<div class="v3row"><span class="v3reg">' + esc(e.name) + '</span>' +
-      '<span class="v3loc">' + esc(e.best.placement) + '</span>' +
+    rest += '<div class="v3row"><span class="v3reg">' + (e.nameHtml || esc(e.name)) + '</span>' +
+      '<span class="v3loc">' + placementLabelHtml(e.best.pair) + '</span>' +
       '<span class="v3v">' + fmtNum(e.best.value) + '<i>ms</i></span></div>';
   }
   const leadHtml = lead ? '<div class="v3lead">' +
     '<div class="v3badge">★ Fastest pairing</div>' +
     '<div class="v3num">' + fmtNum(lead.best.value) + '<span>ms</span></div>' +
-    '<div class="v3route"><b>' + esc(lead.name) + '</b><span class="v3arr">→</span>' +
-      esc(lead.best.placement) + '</div>' +
+    '<div class="v3route"><b>' + (lead.nameHtml || esc(lead.name)) + '</b><span class="v3arr">→</span>' +
+      placementLabelHtml(lead.best.pair) + '</div>' +
   '</div>' : '';
   return '<section class="hx hx3">' +
     '<div class="hx3tabs">' + heroTabs(3, "v3tab") + '</div>' +
@@ -318,9 +395,9 @@ function heroV4() {
   entries.forEach((e, i) => {
     const w = Math.max(4, e.best.value / max * 100);
     rows += '<div class="v4row' + (i === 0 ? " v4best" : "") + '">' +
-      '<div class="v4reg">' + esc(e.name) + '</div>' +
+      '<div class="v4reg">' + (e.nameHtml || esc(e.name)) + '</div>' +
       '<div class="v4barwrap"><div class="v4bar" style="width:' + w + '%"></div>' +
-        '<span class="v4loc">' + esc(e.best.placement) + '</span></div>' +
+        '<span class="v4loc">' + placementLabelHtml(e.best.pair) + '</span></div>' +
       '<div class="v4val">' + fmtNum(e.best.value) + '<i>ms</i></div>' +
     '</div>';
   });
@@ -336,8 +413,8 @@ function heroV5() {
   let rows = "";
   for (const e of entries) {
     const v = e.best ? fmtNum(e.best.value) : "—";
-    const dest = e.best ? esc(e.best.placement) : "—";
-    rows += '<div class="v5row"><span class="v5reg">' + esc(e.name) + '</span>' +
+    const dest = e.best ? placementLabelHtml(e.best.pair) : "—";
+    rows += '<div class="v5row"><span class="v5reg">' + (e.nameHtml || esc(e.name)) + '</span>' +
       '<span class="v5plane">✈</span><span class="v5dest">' + dest + '</span>' +
       '<span class="v5time">' + v + '<i>ms</i></span></div>';
   }
@@ -359,9 +436,9 @@ function heroV6() {
     const has = !!e.best;
     const col = has ? lerpColor((e.best.value - r.lo) / r.span) : "#3a4a4a";
     const val = has ? fmtNum(e.best.value) : "—";
-    const dest = has ? esc(e.best.placement) : "no signal";
+    const dest = has ? placementLabelHtml(e.best.pair) : "no signal";
     rows += '<div class="v6trace">' +
-      '<span class="v6pad v6src">' + esc(e.name) + '</span>' +
+      '<span class="v6pad v6src">' + (e.nameHtml || esc(e.name)) + '</span>' +
       '<span class="v6wire" style="--c:' + col + '">' +
         '<span class="v6chip" style="color:' + col + ';border-color:' + col + '">' + val + '<i>ms</i></span>' +
       '</span>' +
@@ -391,8 +468,8 @@ function heroV7() {
         '<div class="v7inner"><span class="v7v" style="color:' + col + '">' + (has ? fmtNum(e.best.value) : "—") +
           '</span><span class="v7u">ms</span></div>' +
       '</div>' +
-      '<div class="v7reg">' + esc(e.name) + '</div>' +
-      '<div class="v7loc">' + (has ? esc(e.best.placement) : "—") + '</div>' +
+      '<div class="v7reg">' + (e.nameHtml || esc(e.name)) + '</div>' +
+      '<div class="v7loc">' + (has ? placementLabelHtml(e.best.pair) : "—") + '</div>' +
     '</div>';
   }
   return '<section class="hx hx7">' +
@@ -409,9 +486,9 @@ function heroV8() {
   for (const e of entries) {
     const has = !!e.best;
     lines += '<div class="v8line">' +
-      '<span class="v8reg">' + esc(e.name) + '</span>' +
+      '<span class="v8reg">' + (e.nameHtml || esc(e.name)) + '</span>' +
       '<span class="v8mid">deploy on</span>' +
-      '<span class="v8loc">' + (has ? esc(e.best.placement) : "—") + '</span>' +
+      '<span class="v8loc">' + (has ? placementLabelHtml(e.best.pair) : "—") + '</span>' +
       '<span class="v8at">·</span>' +
       '<span class="v8v">' + (has ? fmtNum(e.best.value) : "—") + '<i>ms</i></span>' +
     '</div>';
@@ -431,9 +508,9 @@ function heroV9() {
   for (const e of entries) {
     const has = !!e.best;
     lines += '<div class="v9line">' +
-      '<span class="v9reg">' + esc(e.name) + '</span>' +
+      '<span class="v9reg">' + (e.nameHtml || esc(e.name)) + '</span>' +
       '<span class="v9arr">→</span>' +
-      '<span class="v9loc">' + (has ? esc(e.best.placement) : "(none)") + '</span>' +
+      '<span class="v9loc">' + (has ? placementLabelHtml(e.best.pair) : "(none)") + '</span>' +
       '<span class="v9v">' + (has ? fmtNum(e.best.value) + "ms" : "—") + '</span>' +
     '</div>';
   }
@@ -460,9 +537,9 @@ function heroV10() {
     const rot = (i % 2 === 0 ? 1 : -1) * (1 + (i % 3));
     cards += '<div class="v10stamp" style="transform:rotate(' + rot + 'deg)">' +
       '<div class="v10perf"><div class="v10inner">' +
-        '<div class="v10top"><span class="v10post">PAR AVION</span><span class="v10reg">' + esc(e.name) + '</span></div>' +
+        '<div class="v10top"><span class="v10post">PAR AVION</span><span class="v10reg">' + (e.nameHtml || esc(e.name)) + '</span></div>' +
         '<div class="v10val" style="color:' + col + '">' + (has ? fmtNum(e.best.value) : "—") + '<span>ms</span></div>' +
-        '<div class="v10loc">' + (has ? esc(e.best.placement) : "—") + '</div>' +
+        '<div class="v10loc">' + (has ? placementLabelHtml(e.best.pair) : "—") + '</div>' +
       '</div></div>' +
     '</div>';
   }
@@ -485,7 +562,7 @@ function heroV11() {
   for (const e of entries) {
     const has = !!e.best;
     const col = has ? metricColor(e.best.value, scale) : "#3a4654";
-    const ll = (MODEL.d1coords || {})[(e.key || "").toLowerCase()];
+    const ll = dbCoord(e.key);
     let map = "";
     if (ll && B) {
       const cx = (ll[1] + 180) / 360 * B.w;
@@ -504,10 +581,10 @@ function heroV11() {
     cards += '<div class="v11card">' +
       '<div class="v11map">' + map +
         '<div class="v11fade"></div>' +
-        '<div class="v11name">' + esc(e.name) + '</div>' +
+        '<div class="v11name">' + (e.nameHtml || esc(e.name)) + '</div>' +
         '<div class="v11foot">' +
           '<div class="v11val" style="color:' + col + '">' + (has ? fmtNum(e.best.value) : "—") + '<span>ms</span></div>' +
-          '<div class="v11loc">' + (has ? esc(e.best.placement) : "no data") + '</div>' +
+          '<div class="v11loc">' + (has ? placementLabelHtml(e.best.pair) : "no data") + '</div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -530,7 +607,7 @@ function cartoSpot(ver, schemeCls, kicker) {
   for (const e of entries) {
     const has = !!e.best;
     const col = has ? metricColor(e.best.value, scale) : null;
-    const ll = (MODEL.d1coords || {})[(e.key || "").toLowerCase()];
+    const ll = dbCoord(e.key);
     let map = "";
     if (ll && B) {
       const cx = (ll[1] + 180) / 360 * B.w;
@@ -552,10 +629,10 @@ function cartoSpot(ver, schemeCls, kicker) {
     cards += '<div class="v12card' + sel + '" data-db="' + esc(e.key) + '" tabindex="0" role="button" aria-pressed="' + (sel ? "true" : "false") + '">' +
       '<div class="v12map">' + map +
         '<div class="v12fade"></div>' +
-        '<div class="v12name">' + esc(e.name) + '</div>' +
+        '<div class="v12name">' + (e.nameHtml || esc(e.name)) + '</div>' +
         '<div class="v12foot">' +
           '<div class="v12val"' + (col ? ' style="color:' + col + '"' : '') + '>' + (has ? fmtNum(e.best.value) : "—") + '<span>ms</span></div>' +
-          '<div class="v12loc">' + (has ? esc(e.best.placement) : "no data") + '</div>' +
+          '<div class="v12loc">' + (has ? placementLabelHtml(e.best.pair) : "no data") + '</div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -589,7 +666,7 @@ function matrixPanel() {
       for (const p of dbPairs) {
         const v = p[m.key];
         if (v == null) continue;
-        if (!best || v < best.value) best = { value: v, placement: p.placement };
+        if (!best || v < best.value) best = { value: v, placement: p.placement, pair: p };
       }
       perMetric[m.key] = best;
     }
@@ -621,7 +698,7 @@ function matrixPanel() {
   head += '</tr>';
   let rows = "";
   for (const d of orderedDbs) {
-    rows += '<tr><th class="rowhead l"><span class="tag d1">' + esc(dbLabel(d.key)) + '</span></th>';
+    rows += '<tr><th class="rowhead l"><span class="tag d1">' + dbLabelHtml(d.key) + '</span></th>';
     for (const m of cols) {
       const sorted = state.matrixSort === m.key ? " sorted" : "";
       const best = bestByDbMetric[d.key][m.key];
@@ -630,9 +707,9 @@ function matrixPanel() {
       const t = (best.value - r.lo) / r.span;
       const bg = lerpColor(t);
       rows += '<td class="cell' + sorted + '" style="background:' + bg + '22" title="' +
-        esc(dbLabel(d.key)) + ' — best one-query ' + esc(m.label) + ': ' + fmt(best.value) + ' via ' + esc(best.placement) + '">' +
+        esc(dbLabelText(d.key)) + ' — best one-query ' + esc(m.label) + ': ' + fmt(best.value) + ' via ' + esc(placementLabelText(best.pair)) + '">' +
         '<span class="v" style="color:' + bg + '">' + fmtNum(best.value) + '</span>' +
-        '<span class="loc">' + esc(best.placement) + '</span></td>';
+        '<span class="loc">' + placementLabelHtml(best.pair) + '</span></td>';
     }
     rows += '</tr>';
   }
@@ -654,7 +731,7 @@ function sortedPairs(pairs) {
   const key = state.sort;
   const cmp = (a, b) => {
     let av, bv;
-    if (key === "db") { av = dbLabel(a.dbKey); bv = dbLabel(b.dbKey); return av.localeCompare(bv) * dir; }
+    if (key === "db") { av = dbLabelText(a.dbKey); bv = dbLabelText(b.dbKey); return av.localeCompare(bv) * dir; }
     if (key === "placement") return a.placement.localeCompare(b.placement) * dir;
     if (key === "status") return pairStatus(a).localeCompare(pairStatus(b)) * dir;
     if (key === "metric") { av = metricVal(a); bv = metricVal(b); }
@@ -693,8 +770,8 @@ function globalTablePanel() {
   for (const p of pairs) {
     const isBest = bestKey === p.dbKey + "|" + p.placement;
     rows += '<tr class="' + (isBest ? "best" : "") + (p.status === "failed" ? " failed" : "") + '">' +
-      '<td class="l"><span class="tag d1">' + esc(dbLabel(p.dbKey)) + '</span></td>' +
-      '<td class="l"><span class="tag wk">' + esc(p.placement) + '</span>' + (isBest ? ' <span class="tag win">best</span>' : '') + '</td>' +
+      '<td class="l"><span class="tag d1">' + dbLabelHtml(p.dbKey) + '</span></td>' +
+      '<td class="l"><span class="tag wk">' + placementLabelHtml(p) + '</span>' + (isBest ? ' <span class="tag win">best</span>' : '') + '</td>' +
       '<td class="metric">' + fmt(metricVal(p)) + '</td>' +
       '<td>' + fmt(p.avg) + '</td>' +
       '<td>' + fmt(p.p50) + '</td>' +
@@ -725,9 +802,9 @@ function regionPanel() {
   const scale = metricScale();
   const bars = pairBars(ranked, winner, false, scale);
 
-  return '<div class="mapwrap full"><div class="map-name">' + esc(dbLabel(d.key)) + '</div>' +
+  return '<div class="mapwrap full"><div class="map-name">' + dbLabelHtml(d.key) + '</div>' +
       regionMap(d, ranked, scale) + '</div>' +
-    '<div class="list-title">' + esc(dbLabel(d.key)) + ' to worker locations</div>' +
+    '<div class="list-title">' + dbLabelHtml(d.key) + ' to worker locations</div>' +
     '<div class="bars">' + bars + '</div>';
 }
 
@@ -771,11 +848,12 @@ function pairBars(pairs, winner, includeDb, scale) {
     const t = Math.min(1, (v - scale.gMin) / scale.span);
     const col = lerpColor(t);
     const isBest = p === winner;
-    const name = includeDb ? dbLabel(p.dbKey) + " → " + p.placement : p.placement;
+    const name = includeDb ? dbLabelText(p.dbKey) + " → " + placementLabelText(p) : placementLabelText(p);
+    const nameHtml = includeDb ? dbLabelHtml(p.dbKey) + " → " + placementLabelHtml(p) : placementLabelHtml(p);
     const fillStyle = over ? 'width:100%' : 'width:' + w + '%;background:' + col;
     const fillInner = over ? '<span class="over-label">off scale &#8250;&#8250;</span>' : '';
     bars += '<div class="barrow ' + (isBest ? "best" : "") + '">' +
-      '<div class="name" title="' + esc(name) + '">' + esc(name) + '</div>' +
+      '<div class="name" title="' + esc(name) + '">' + nameHtml + '</div>' +
       '<div class="track"><div class="fill' + (over ? " over" : "") + '" style="' + fillStyle + '"' +
         (over ? ' title="off scale (above ' + fmt(scale.scaleMax) + ')"' : '') + '>' + fillInner + '</div></div>' +
       '<div class="val' + (over ? " over-val" : "") + '"><span class="num">' + fmtNum(v) + '</span><span class="u">ms</span></div>' +
@@ -784,12 +862,12 @@ function pairBars(pairs, winner, includeDb, scale) {
   return bars;
 }
 
-// World map for one D1: the region marker plus an arc to every worker placement.
+// World map for one D1: the region marker plus an arc to every observed Worker placement colo.
 function regionMap(d, ranked, scale) {
   const B = MODEL.basemap;
   if (!B) return '<div class="empty">No basemap available.</div>';
   const W = B.w, H = B.h;
-  const d1ll = (MODEL.d1coords || {})[(d.key || "").toLowerCase()];
+  const d1ll = dbCoord(d.key);
   let land = "";
   for (const path of B.paths) land += '<path class="mland" d="' + path + '"/>';
   // Crop the empty polar bands (above ~80°N / below ~58°S) so the full-width
@@ -800,23 +878,24 @@ function regionMap(d, ranked, scale) {
   const d1pt = projXY(d1ll[0], d1ll[1], W, H);
   let arcs = "", dots = "";
   for (const p of ranked) {
-    const c = placeCoord(p.placement);
+    const c = observedPlaceCoord(p);
     if (!c) continue;
     const pt = projXY(c[0], c[1], W, H);
     const v = metricVal(p);
     const col = metricColor(v, scale);
     arcs += '<path class="marc" d="' + arcPath(d1pt, pt) + '" stroke="' + col + '"></path>';
     dots += '<circle class="mw" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) +
-      '" r="7" fill="' + col + '" data-ms="' + fmtNum(v) + '" data-loc="' + esc(p.placement) + '"></circle>';
+      '" r="7" fill="' + col + '" data-ms="' + fmtNum(v) + '" data-loc="' + esc(placementLabelText(p)) +
+      '" data-loc-html="' + esc(placementLabelHtml(p)) + '"></circle>';
   }
   dots += '<circle class="md1halo" cx="' + d1pt[0].toFixed(1) + '" cy="' + d1pt[1].toFixed(1) + '" r="22"></circle>' +
     '<circle class="md1" cx="' + d1pt[0].toFixed(1) + '" cy="' + d1pt[1].toFixed(1) + '" r="11">' +
-    '<title>D1 ' + esc(dbLabel(d.key)) + '</title></circle>';
+    '<title>D1 ' + esc(dbLabelText(d.key)) + '</title></circle>';
   return '<svg class="regionmap" viewBox="' + vb + '" preserveAspectRatio="xMidYMid meet">' +
     '<g>' + land + '</g>' + arcs + dots + '</svg>';
 }
 
-// World map for all D1 regions: every D1 marker plus every D1-to-Worker line.
+// World map for all D1 regions: every D1 marker plus every D1-to-observed-Worker-colo line.
 function allRegionMap(pairs, scale) {
   const B = MODEL.basemap;
   if (!B) return '<div class="empty">No basemap available.</div>';
@@ -828,8 +907,8 @@ function allRegionMap(pairs, scale) {
   let arcs = "", dots = "", d1s = "";
   const byPlacement = {};
   for (const p of pairs) {
-    const d1ll = (MODEL.d1coords || {})[(p.dbKey || "").toLowerCase()];
-    const c = placeCoord(p.placement);
+    const d1ll = dbCoord(p.dbKey);
+    const c = observedPlaceCoord(p);
     if (!d1ll || !c) continue;
     const d1pt = projXY(d1ll[0], d1ll[1], W, H);
     const pt = projXY(c[0], c[1], W, H);
@@ -837,31 +916,35 @@ function allRegionMap(pairs, scale) {
     const col = metricColor(v, scale);
     arcs += '<path class="marc" d="' + arcPath(d1pt, pt) + '" stroke="' + col + '"></path>';
     if (!byPlacement[p.placement]) {
-      byPlacement[p.placement] = { placement: p.placement, pt: pt, values: [] };
+      byPlacement[p.placement] = { placement: p.placement, pt: pt, values: [], placementColos: {}, noteCounts: {} };
     }
-    byPlacement[p.placement].values.push({ db: dbLabel(p.dbKey), placement: p.placement, value: v });
+    mergePairColos(byPlacement[p.placement], p);
+    byPlacement[p.placement].values.push({ dbKey: p.dbKey, placement: p.placement, value: v });
   }
   for (const entry of Object.values(byPlacement)) {
     entry.values.sort((a, b) => a.value - b.value);
     const avg = entry.values.reduce((sum, item) => sum + item.value, 0) / entry.values.length;
     const col = metricColor(avg, scale);
+    const c = observedPlaceCoord(entry);
+    if (c) entry.pt = projXY(c[0], c[1], W, H);
     const tipRows = entry.values.map(item => ({
-      db: item.db,
+      dbKey: item.dbKey,
       value: fmtNum(item.value),
     }));
     dots += '<circle class="mw" cx="' + entry.pt[0].toFixed(1) + '" cy="' + entry.pt[1].toFixed(1) +
-      '" r="6.5" fill="' + col + '" data-region="' + esc(entry.placement) + '" data-list="' +
+      '" r="6.5" fill="' + col + '" data-region="' + esc(placementLabelText(entry)) +
+      '" data-region-html="' + esc(placementLabelHtml(entry)) + '" data-list="' +
       esc(JSON.stringify(tipRows)) + '"></circle>';
   }
   for (const d of MODEL.databases) {
-    const d1ll = (MODEL.d1coords || {})[(d.key || "").toLowerCase()];
+    const d1ll = dbCoord(d.key);
     if (!d1ll) continue;
     const pt = projXY(d1ll[0], d1ll[1], W, H);
     d1s += '<circle class="md1halo" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="20"></circle>' +
       '<circle class="md1" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="9">' +
-      '<title>D1 ' + esc(dbLabel(d.key)) + '</title></circle>' +
+      '<title>D1 ' + esc(dbLabelText(d.key)) + '</title></circle>' +
       '<text class="md1label" x="' + (pt[0] + 14).toFixed(1) + '" y="' + (pt[1] - 12).toFixed(1) + '">' +
-      esc(dbLabel(d.key)) + '</text>';
+      dbSvgLabel(d.key) + '</text>';
   }
   return '<svg class="regionmap" viewBox="' + vb + '" preserveAspectRatio="xMidYMid meet">' +
     '<g>' + land + '</g>' + arcs + dots + d1s + '</svg>';
@@ -884,16 +967,16 @@ function wire() {
         if (list) {
           let rows = [];
           try { rows = JSON.parse(list); } catch (error) {}
-          msEl.textContent = t.getAttribute("data-region") || "Worker region";
+          msEl.innerHTML = t.getAttribute("data-region-html") || esc(t.getAttribute("data-region") || "Worker region");
           locEl.innerHTML = '<div class="maptip-list">' + rows.map(row =>
             '<div class="maptip-row">' +
-              '<span class="maptip-d1">' + esc(row.db) + '</span>' +
+              '<span class="maptip-d1">' + dbLabelHtml(row.dbKey) + '</span>' +
               '<span class="maptip-value">' + esc(row.value) + '<span class="u">ms</span></span>' +
             '</div>'
           ).join("") + '</div>';
         } else {
           msEl.innerHTML = t.getAttribute("data-ms") + '<span class="u">ms</span>';
-          locEl.textContent = t.getAttribute("data-loc");
+          locEl.innerHTML = t.getAttribute("data-loc-html") || esc(t.getAttribute("data-loc"));
         }
         tip.hidden = false;
         const w = tip.offsetWidth || 120;

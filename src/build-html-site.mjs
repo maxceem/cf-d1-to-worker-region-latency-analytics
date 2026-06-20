@@ -42,15 +42,17 @@ async function main() {
 
   const inputPath = await resolveInputPath(args.input);
   const raw = JSON.parse(await readFile(inputPath, "utf8"));
-  const [basemap, d1LocationCoordinates, providerRegionCoordinates] = await Promise.all([
+  const [basemap, d1LocationCoordinates, providerRegionCoordinates, workerColoCoordinates] = await Promise.all([
     readJson("data/world-basemap.json"),
     readJson("data/d1-location-coordinates.json"),
     readJson("data/provider-region-coordinates.json"),
+    readJson("data/worker-colo-coordinates.json"),
   ]);
   const model = buildModel(raw);
   model.basemap = basemap;
   model.d1coords = d1LocationCoordinates;
   model.coords = providerRegionCoordinates;
+  model.coloCoords = workerColoCoordinates;
   model.repoUrl = REPO_URL;
   const exploreDataModel = buildRawModel(raw);
   exploreDataModel.repoUrl = REPO_URL;
@@ -170,6 +172,8 @@ function buildModel(raw) {
     name: db.name || null,
     targetLocation: db.targetLocation || null,
     observedRegion: db.observedRegion || null,
+    d1Colo: observedD1Colos(raw, db.key)[0] || null,
+    d1Colos: observedD1Colos(raw, db.key),
   }));
   const placements = raw.workerPlacements || [];
 
@@ -216,6 +220,8 @@ function buildRawModel(raw) {
     label: db.label || db.key,
     targetLocation: db.targetLocation || null,
     observedRegion: db.observedRegion || null,
+    d1Colo: observedD1Colos(raw, db.key)[0] || null,
+    d1Colos: observedD1Colos(raw, db.key),
   }));
   const databaseByKey = Object.fromEntries(databases.map((db) => [db.key, db]));
   const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
@@ -365,6 +371,22 @@ function summarizePair(db, placement, requests, { minSuccessfulRequests }) {
     d1Regions,
     d1Colos,
   };
+}
+
+function observedD1Colos(raw, dbKey) {
+  const counts = {};
+  for (const requests of Object.values(raw.measured?.[dbKey] || {})) {
+    for (const request of requests || []) {
+      for (const [colo, count] of Object.entries(request?.body?.d1?.colos || {})) {
+        if (!colo) continue;
+        counts[colo] = (counts[colo] || 0) + (Number(count) || 0);
+      }
+    }
+  }
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([colo]) => colo);
 }
 
 function adjustedTotalMs(body) {

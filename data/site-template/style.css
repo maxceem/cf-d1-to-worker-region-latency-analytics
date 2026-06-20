@@ -623,6 +623,7 @@ table.matrix th.rowhead { text-align: left; }
 .rp-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 52px 0 20px; }
 .rp-head h2 { margin: 0; }
 .mapwrap { background: var(--map-ocean); border-radius: 10px; overflow: hidden; position: relative; }
+.d1-colo, .placement-colo { color: var(--muted); font-weight: 500; }
 .map-name { position: absolute; top: 16px; left: max(20px, calc((100vw - 1180px) / 2 + 20px)); z-index: 2; font-size: 16px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text); text-shadow: 0 1px 8px rgba(0,0,0,.55); pointer-events: none; }
 .list-title { font-size: 16px; font-weight: 600; letter-spacing: .04em; color: var(--text); margin: 0 0 18px; }
 [data-theme="light"] .map-name { text-shadow: 0 1px 6px rgba(255,255,255,.85); }
@@ -634,6 +635,7 @@ table.matrix th.rowhead { text-align: left; }
 .regionmap .md1 { fill: var(--accent-2); stroke: #fff; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .regionmap .md1halo { fill: var(--accent-2); opacity: .16; }
 .regionmap .md1label { fill: var(--text); font-size: 15px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; paint-order: stroke; stroke: var(--map-ocean); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+.regionmap .md1label .md1colo { fill: var(--muted); font-weight: 500; }
 [data-theme="dark"] .v12pin, [data-theme="dark"] .regionmap .md1 { stroke: rgba(0,0,0,.5); }
 .regionmap .mw { cursor: pointer; transition: r .1s ease; }
 .regionmap .mw:hover { r: 9; }
