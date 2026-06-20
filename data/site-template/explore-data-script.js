@@ -121,7 +121,6 @@ function render() {
     '<section class="raw-head">' +
       '<h1>Explore Data</h1>' +
       runStamp() +
-      '<p class="sub">Inspect every measured query, including D1 serving location, Worker reported colo, and the placement header returned by Cloudflare.</p>' +
     '</section>' +
     filtersPanel() +
     rawTable() +
