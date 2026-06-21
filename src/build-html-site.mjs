@@ -316,6 +316,7 @@ function serializeBenchmarkConfig(benchmark) {
   return {
     warmupRequests: benchmark.warmupRequests,
     measuredRequests: benchmark.measuredRequests,
+    splitInRounds: benchmark.splitInRounds,
     minSuccessfulRequests: benchmark.minSuccessfulRequests,
     queriesPerRequest: benchmark.queriesPerRequest,
     requestTimeoutMs: benchmark.requestTimeoutMs,

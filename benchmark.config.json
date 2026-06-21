@@ -9,8 +9,9 @@
   "workerObservabilityEnabled": true,
   "maxWorkersPerBatch": 50,
   "benchmark": {
-    "warmupRequests": 1,
-    "measuredRequests": 10,
+    "warmupRequests": 3,
+    "measuredRequests": 100,
+    "splitInRounds": 5,
     "minSuccessfulRequests": 5,
     "queriesPerRequest": 5,
     "requestTimeoutMs": 30000

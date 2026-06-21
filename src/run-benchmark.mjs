@@ -44,6 +44,14 @@ async function main() {
   const workerPlacementsByD1Location = resolveWorkerPlacementMatrix(config, d1Locations, benchmarkData.workerPlacements);
   const candidatePlacements = unique(Object.values(workerPlacementsByD1Location).flat());
   validateWorkerPlacementMatrix(workerPlacementsByD1Location);
+  const placementBatches = chunk(candidatePlacements, config.maxWorkersPerBatch);
+  const progress = createBenchmarkProgress({
+    config,
+    d1Locations,
+    workerPlacementsByD1Location,
+    candidatePlacements,
+    placementBatches
+  });
 
   const auth = readAuthFromEnv();
   const accountId = await resolveAccountId(auth, config.accountId);
@@ -56,19 +64,18 @@ async function main() {
   let databases = [];
   let rawResult = undefined;
 
-  console.log("D1 exact provider-region pinning is not exposed by Cloudflare.");
-  console.log("This benchmark tests Worker targeted placement against the observed D1 region.");
-  console.log("");
-  console.log(`Account: ${accountId}`);
-  console.log(`Run: ${runId}`);
+  progress.log("D1 exact provider-region pinning is not exposed by Cloudflare.");
+  progress.log("This benchmark tests Worker targeted placement against the observed D1 region.");
+  progress.log(`Account: ${accountId}`);
+  progress.log(`Run: ${runId}`);
 
   await mkdir(tempDir, { recursive: true });
   await mkdir(resultsDir, { recursive: true });
 
   try {
-    databases = await prepareDatabases({ auth, accountId, config, runId, d1Locations });
+    databases = await prepareDatabases({ auth, accountId, config, runId, d1Locations, progress });
     for (const database of databases) {
-      console.log(
+      progress.log(
         `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "unknown"}, observed=${database.observedRegion ?? "unknown"}`
       );
     }
@@ -95,11 +102,10 @@ async function main() {
       measured: {}
     };
 
-    const placementBatches = chunk(candidatePlacements, config.maxWorkersPerBatch);
     for (let batchIndex = 0; batchIndex < placementBatches.length; batchIndex += 1) {
       const placements = placementBatches[batchIndex];
       const batchWorkers = [];
-      console.log(`Deploying Worker batch ${batchIndex + 1}/${placementBatches.length} (${placements.length} Workers)...`);
+      progress.log(`Starting Worker batch ${batchIndex + 1}/${placementBatches.length} (${placements.length} Workers)...`);
 
       try {
         const workers = await deployWorkers({
@@ -111,48 +117,89 @@ async function main() {
           runId,
           tempDir,
           workerSourcePath,
-          deployedWorkers
+          deployedWorkers,
+          progress
         });
         batchWorkers.push(...workers);
         rawResult.batches.push({ index: batchIndex, placements, workers });
         await persistProgress(resultsDir, rawResult);
 
         if (config.propagationSeconds > 0) {
-          console.log(`Waiting ${config.propagationSeconds}s for Worker propagation...`);
+          progress.log(`Starting Worker propagation wait (${config.propagationSeconds}s)...`);
           await sleep(config.propagationSeconds * 1000);
+          progress.recordPropagationWait();
+          progress.log(`Finished Worker propagation wait (${config.propagationSeconds}s).`);
         }
 
-        for (const database of databases) {
-          const placementsForDatabase = new Set(workerPlacementsByD1Location[database.targetLocation] || []);
-          ensureResultBucket(rawResult.warmup, database.key);
-          ensureResultBucket(rawResult.measured, database.key);
+        const measuredRequestsByRound = splitRequestsAcrossRounds(
+          config.benchmark.measuredRequests,
+          config.benchmark.splitInRounds
+        );
 
-          for (const worker of workers) {
-            if (!placementsForDatabase.has(worker.placement)) continue;
-            console.log(`Warmup: D1 ${database.label} x Worker ${worker.placement}`);
-            rawResult.warmup[database.key][worker.placement] = await runRequests({
-              worker,
-              database,
-              requests: config.benchmark.warmupRequests,
-              queriesPerRequest: config.benchmark.queriesPerRequest,
-              timeoutMs: config.benchmark.requestTimeoutMs
-            });
-            await persistProgress(resultsDir, rawResult);
+        for (let roundIndex = 0; roundIndex < measuredRequestsByRound.length; roundIndex += 1) {
+          const measuredRequests = measuredRequestsByRound[roundIndex];
+          const roundLabel = `${roundIndex + 1}/${measuredRequestsByRound.length}`;
+          progress.log(
+            `Starting benchmark round ${roundLabel} (${measuredRequests} measured requests per pair)...`
+          );
 
-            console.log(`Measured: D1 ${database.label} x Worker ${worker.placement}`);
-            rawResult.measured[database.key][worker.placement] = await runRequests({
-              worker,
-              database,
-              requests: config.benchmark.measuredRequests,
-              queriesPerRequest: config.benchmark.queriesPerRequest,
-              timeoutMs: config.benchmark.requestTimeoutMs
-            });
-            await persistProgress(resultsDir, rawResult);
+          for (const database of databases) {
+            const placementsForDatabase = new Set(workerPlacementsByD1Location[database.targetLocation] || []);
+            ensureResultBucket(rawResult.warmup, database.key);
+            ensureResultBucket(rawResult.measured, database.key);
+
+            for (const worker of workers) {
+              if (!placementsForDatabase.has(worker.placement)) continue;
+
+              if (!rawResult.warmup[database.key][worker.placement]) {
+                rawResult.warmup[database.key][worker.placement] = [];
+              }
+              if (!rawResult.measured[database.key][worker.placement]) {
+                rawResult.measured[database.key][worker.placement] = [];
+              }
+
+              const pairLabel = `D1 ${database.label} x Worker ${worker.placement}`;
+              progress.log(
+                `Starting warmup: round ${roundLabel}, ${pairLabel} (${config.benchmark.warmupRequests} requests)...`
+              );
+              const warmupResults = await runRequests({
+                worker,
+                database,
+                requests: config.benchmark.warmupRequests,
+                queriesPerRequest: config.benchmark.queriesPerRequest,
+                timeoutMs: config.benchmark.requestTimeoutMs,
+                progress
+              });
+              rawResult.warmup[database.key][worker.placement].push(...warmupResults);
+              await persistProgress(resultsDir, rawResult);
+              progress.log(
+                `Finished warmup: round ${roundLabel}, ${pairLabel} (${warmupResults.length} requests).`
+              );
+
+              progress.log(
+                `Starting measurement: round ${roundLabel}, ${pairLabel} (${measuredRequests} requests)...`
+              );
+              const measuredResults = await runRequests({
+                worker,
+                database,
+                requests: measuredRequests,
+                queriesPerRequest: config.benchmark.queriesPerRequest,
+                timeoutMs: config.benchmark.requestTimeoutMs,
+                progress
+              });
+              rawResult.measured[database.key][worker.placement].push(...measuredResults);
+              await persistProgress(resultsDir, rawResult);
+              progress.log(
+                `Finished measurement: round ${roundLabel}, ${pairLabel} (${rawResult.measured[database.key][worker.placement].length}/${config.benchmark.measuredRequests} measured requests collected).`
+              );
+            }
           }
+
+          progress.log(`Finished benchmark round ${roundLabel}.`);
         }
       } finally {
         if (config.cleanupWorkers) {
-          await cleanupWorkers(batchWorkers.map((worker) => worker.name), accountId);
+          await cleanupWorkers(batchWorkers.map((worker) => worker.name), accountId, progress);
           removeDeployedWorkers(deployedWorkers, batchWorkers.map((worker) => worker.name));
         }
       }
@@ -160,15 +207,15 @@ async function main() {
 
     rawResult.run.completedAt = new Date().toISOString();
     await writeOutputs(resultsDir, rawResult);
-    await buildAndOpenSite({ config, resultsDir, rootDir });
+    await buildAndOpenSite({ config, resultsDir, rootDir, progress });
     const summary = buildSummary(rawResult, benchmarkData);
     printSummary(summary, resultsDir);
   } finally {
     await writePartialIfNeeded(resultsDir, rawResult);
     if (config.cleanupWorkers && deployedWorkers.length > 0) {
-      await cleanupWorkers(deployedWorkers, accountId);
+      await cleanupWorkers(deployedWorkers, accountId, progress);
     } else if (deployedWorkers.length > 0) {
-      console.log(`Keeping ${deployedWorkers.length} benchmark Workers because cleanupWorkers=false.`);
+      progress.log(`Keeping ${deployedWorkers.length} benchmark Workers because cleanupWorkers=false.`);
     }
 
     for (const database of databases) {
@@ -177,9 +224,9 @@ async function main() {
         config.deleteD1DatabasesAfterRun !== false;
 
       if (shouldDeleteDatabase) {
-        await cleanupDatabase(database.name, accountId);
+        await cleanupDatabase(database.name, accountId, progress);
       } else if (database.created) {
-        console.log(`Keeping disposable D1 database ${database.name}.`);
+        progress.log(`Keeping disposable D1 database ${database.name}.`);
       }
     }
 
@@ -397,10 +444,13 @@ function validateConfig(config, benchmarkData) {
     throw new Error("maxWorkersPerBatch must be a positive integer.");
   }
   requirePlainObject(config.benchmark, "benchmark");
-  for (const key of ["warmupRequests", "measuredRequests", "queriesPerRequest", "requestTimeoutMs"]) {
+  for (const key of ["warmupRequests", "measuredRequests", "splitInRounds", "queriesPerRequest", "requestTimeoutMs"]) {
     if (!Number.isInteger(config.benchmark[key]) || config.benchmark[key] < 1) {
       throw new Error(`benchmark.${key} must be a positive integer.`);
     }
+  }
+  if (config.benchmark.splitInRounds > config.benchmark.measuredRequests) {
+    throw new Error("benchmark.splitInRounds cannot be greater than benchmark.measuredRequests.");
   }
   if (!Number.isInteger(config.benchmark.minSuccessfulRequests) || config.benchmark.minSuccessfulRequests < 1) {
     throw new Error("benchmark.minSuccessfulRequests must be a positive integer.");
@@ -415,6 +465,141 @@ function validateConfig(config, benchmarkData) {
   requireString(config.resultsDir, "resultsDir");
   requireString(config.siteOutputPath, "siteOutputPath");
   requireBoolean(config.openSiteAfterRun, "openSiteAfterRun");
+}
+
+function createBenchmarkProgress({ config, d1Locations, workerPlacementsByD1Location, candidatePlacements, placementBatches }) {
+  const totalRequests = countPlannedBenchmarkRequests(config, d1Locations, workerPlacementsByD1Location);
+  const totals = {
+    d1Creates: d1Locations.length,
+    workerCreates: candidatePlacements.length,
+    d1Deletes: config.deleteD1DatabasesAfterRun !== false ? d1Locations.length : 0,
+    workerDeletes: config.cleanupWorkers ? candidatePlacements.length : 0,
+    propagationWaits: config.propagationSeconds > 0 ? placementBatches.length : 0
+  };
+  const stats = {
+    request: createDurationAverage(),
+    d1Create: createDurationAverage(),
+    workerCreate: createDurationAverage(),
+    d1Delete: createDurationAverage(),
+    workerDelete: createDurationAverage()
+  };
+  const completed = {
+    requests: 0,
+    propagationWaits: 0
+  };
+
+  return {
+    log(message) {
+      console.log(`${progressPrefix()} ${message}`);
+    },
+    warn(message) {
+      console.warn(`${progressPrefix()} ${message}`);
+    },
+    recordRequest(ms) {
+      completed.requests += 1;
+      stats.request.record(ms);
+    },
+    recordD1Create(ms) {
+      stats.d1Create.record(ms);
+    },
+    recordWorkerCreate(ms) {
+      stats.workerCreate.record(ms);
+    },
+    recordD1Delete(ms) {
+      stats.d1Delete.record(ms);
+    },
+    recordWorkerDelete(ms) {
+      stats.workerDelete.record(ms);
+    },
+    recordPropagationWait() {
+      completed.propagationWaits += 1;
+    }
+  };
+
+  function progressPrefix() {
+    const requestProgress = formatRequestProgress(completed.requests, totalRequests);
+    const etaMs = estimateRemainingMs();
+    if (etaMs == null) return `[${requestProgress}]`;
+    return `[${requestProgress}, eta: ${formatDuration(etaMs)}]`;
+  }
+
+  function estimateRemainingMs() {
+    if (stats.request.count === 0) return null;
+
+    return (
+      remaining(totalRequests, completed.requests) * stats.request.averageMs +
+      remaining(totals.d1Creates, stats.d1Create.count) * knownAverage(stats.d1Create) +
+      remaining(totals.workerCreates, stats.workerCreate.count) * knownAverage(stats.workerCreate) +
+      remaining(totals.d1Deletes, stats.d1Delete.count) * knownAverage(stats.d1Delete) +
+      remaining(totals.workerDeletes, stats.workerDelete.count) * knownAverage(stats.workerDelete) +
+      remaining(totals.propagationWaits, completed.propagationWaits) * config.propagationSeconds * 1000
+    );
+  }
+}
+
+function countPlannedBenchmarkRequests(config, d1Locations, workerPlacementsByD1Location) {
+  const requestsPerPair =
+    config.benchmark.measuredRequests +
+    config.benchmark.warmupRequests * config.benchmark.splitInRounds;
+  const pairCount = d1Locations.reduce(
+    (count, location) => count + unique(workerPlacementsByD1Location[location] || []).length,
+    0
+  );
+  return pairCount * requestsPerPair;
+}
+
+function createDurationAverage() {
+  let count = 0;
+  let averageMs = 0;
+  return {
+    get count() {
+      return count;
+    },
+    get averageMs() {
+      return averageMs;
+    },
+    record(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return;
+      count += 1;
+      averageMs += (ms - averageMs) / count;
+    }
+  };
+}
+
+function knownAverage(stat) {
+  return stat.count > 0 ? stat.averageMs : 0;
+}
+
+function remaining(total, completed) {
+  return Math.max(0, total - completed);
+}
+
+function formatRequestProgress(completedRequests, totalRequests) {
+  const width = Math.max(5, String(Math.max(completedRequests, totalRequests)).length);
+  return `#${String(completedRequests).padStart(width, "0")}/${totalRequests}`;
+}
+
+function formatDuration(ms) {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  if (seconds === 0) return "0s";
+
+  const units = [
+    ["d", 86400],
+    ["h", 3600],
+    ["m", 60],
+    ["s", 1]
+  ];
+  const parts = [];
+  let remainder = seconds;
+  for (const [label, unitSeconds] of units) {
+    const value = Math.floor(remainder / unitSeconds);
+    if (value > 0) {
+      parts.push(`${value}${label}`);
+      remainder -= value * unitSeconds;
+    }
+    if (parts.length === 2) break;
+  }
+  return parts.join(" ");
 }
 
 function resolveWorkerPlacementMatrix(config, d1Locations, dataWorkerPlacements) {
@@ -526,16 +711,23 @@ async function resolveAccountId(auth, configuredAccountId) {
   throw new Error(`The credential can access multiple accounts. Set accountId or CLOUDFLARE_ACCOUNT_ID. Accounts: ${choices}`);
 }
 
-async function prepareDatabases({ auth, accountId, config, runId, d1Locations }) {
+async function prepareDatabases({ auth, accountId, config, runId, d1Locations, progress }) {
   const locations = d1Locations;
   const namePrefix = config.d1DatabaseNamePrefix;
   const databaseConfig = config.database || {};
   const databases = [];
 
-  console.log(`Creating ${locations.length} disposable D1 databases before Worker tests...`);
+  progress.log(`Starting setup for ${locations.length} disposable D1 databases before Worker tests...`);
   for (const location of locations) {
     const name = `${namePrefix}-${location}-${Date.now()}`;
-    const createdDatabase = await createD1Database(name, { ...databaseConfig, location, jurisdiction: undefined }, accountId);
+    const started = performance.now();
+    progress.log(`Starting disposable D1 database setup: ${name} (${location})...`);
+    const createdDatabase = await createD1Database(
+      name,
+      { ...databaseConfig, location, jurisdiction: undefined },
+      accountId,
+      progress
+    );
     await registerResource({
       type: "d1",
       accountId,
@@ -550,18 +742,21 @@ async function prepareDatabases({ auth, accountId, config, runId, d1Locations })
       databaseConfig: createdDatabase.id ? { id: createdDatabase.id, name } : { name },
       created: true,
       targetLocation: location,
-      label: location
+      label: location,
+      progress
     });
+    progress.recordD1Create(performance.now() - started);
+    progress.log(`Finished disposable D1 database setup: ${name} (${database.id}).`);
     databases.push(database);
   }
 
   return databases;
 }
 
-async function prepareOneDatabase({ auth, accountId, databaseConfig, created, targetLocation, label }) {
+async function prepareOneDatabase({ auth, accountId, databaseConfig, created, targetLocation, label, progress }) {
   const database = await findDatabase(auth, accountId, databaseConfig);
-  await seedDatabase(database.name, accountId);
-  const observed = await observeD1Region(auth, accountId, database.id);
+  await seedDatabase(database.name, accountId, progress);
+  const observed = await observeD1Region(auth, accountId, database.id, progress);
   const info = await getDatabaseInfo(auth, accountId, database.id).catch(() => undefined);
   const observedRegion = observed?.servedByRegion ?? info?.running_in_region ?? info?.primary_location_hint;
 
@@ -638,8 +833,8 @@ async function getDatabaseInfo(auth, accountId, databaseId) {
   return response.result;
 }
 
-async function createD1Database(name, databaseConfig, accountId) {
-  console.log(`Creating disposable D1 database: ${name}`);
+async function createD1Database(name, databaseConfig, accountId, progress) {
+  progress.log(`Starting D1 database creation: ${name}...`);
   const args = ["d1", "create", name];
   if (databaseConfig.jurisdiction) {
     args.push("--jurisdiction", databaseConfig.jurisdiction);
@@ -647,6 +842,7 @@ async function createD1Database(name, databaseConfig, accountId) {
     args.push("--location", databaseConfig.location);
   }
   const output = await runWrangler(args, { CLOUDFLARE_ACCOUNT_ID: accountId });
+  progress.log(`Finished D1 database creation: ${name}.`);
   return {
     name,
     id: extractD1DatabaseId(output),
@@ -654,8 +850,8 @@ async function createD1Database(name, databaseConfig, accountId) {
   };
 }
 
-async function seedDatabase(databaseName, accountId) {
-  console.log("Creating and seeding benchmark table...");
+async function seedDatabase(databaseName, accountId, progress) {
+  progress.log(`Starting benchmark table seed: ${databaseName}...`);
   const sql = [
     "CREATE TABLE IF NOT EXISTS bench_items (id INTEGER PRIMARY KEY, value TEXT NOT NULL);",
     "DELETE FROM bench_items;",
@@ -668,9 +864,10 @@ async function seedDatabase(databaseName, accountId) {
   await runWrangler(["d1", "execute", databaseName, "--remote", "--command", sql, "--yes"], {
     CLOUDFLARE_ACCOUNT_ID: accountId
   });
+  progress.log(`Finished benchmark table seed: ${databaseName}.`);
 }
 
-async function observeD1Region(auth, accountId, databaseId) {
+async function observeD1Region(auth, accountId, databaseId, progress) {
   try {
     const response = await cfRequest(auth, `/accounts/${accountId}/d1/database/${databaseId}/query`, {
       method: "POST",
@@ -685,16 +882,18 @@ async function observeD1Region(auth, accountId, databaseId) {
       rawMeta: meta
     };
   } catch (error) {
-    console.warn(`Could not observe D1 region through the query API: ${error.message}`);
+    progress.warn(`Could not observe D1 region through the query API: ${error.message}`);
     return undefined;
   }
 }
 
-async function deployWorkers({ accountId, config, databases, placements, batchIndex, runId, tempDir, workerSourcePath, deployedWorkers }) {
+async function deployWorkers({ accountId, config, databases, placements, batchIndex, runId, tempDir, workerSourcePath, deployedWorkers, progress }) {
   const workers = [];
 
   for (const placement of placements) {
     const workerName = sanitizeWorkerName(`${config.workerNamePrefix}-b${batchIndex + 1}-${placement}`);
+    const started = performance.now();
+    progress.log(`Starting Worker deployment: ${workerName} (${placement})...`);
     const workerDir = path.join(tempDir, workerName);
     const configPath = path.join(workerDir, "wrangler.json");
     await mkdir(workerDir, { recursive: true });
@@ -729,7 +928,7 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
 
     await writeFile(configPath, `${JSON.stringify(wranglerConfig, null, 2)}\n`, "utf8");
 
-    const deployOutput = await deployWorkerWithRetry(workerName, placement, configPath, accountId);
+    const deployOutput = await deployWorkerWithRetry(workerName, placement, configPath, accountId, progress);
     deployedWorkers.push(workerName);
     const url = extractWorkersDevUrl(deployOutput);
     if (!url) {
@@ -744,23 +943,27 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
       metadata: { placement, batchIndex }
     });
     workers.push({ name: workerName, placement, url, configPath });
+    progress.recordWorkerCreate(performance.now() - started);
+    progress.log(`Finished Worker deployment: ${workerName} (${placement}).`);
   }
 
   return workers;
 }
 
-async function deployWorkerWithRetry(workerName, placement, configPath, accountId) {
+async function deployWorkerWithRetry(workerName, placement, configPath, accountId, progress) {
   for (let attempt = 1; attempt <= WORKER_DEPLOY_RETRY_ATTEMPTS; attempt += 1) {
-    console.log(`Deploying ${workerName} (${placement})...`);
+    progress.log(`Starting Worker deploy attempt ${attempt}/${WORKER_DEPLOY_RETRY_ATTEMPTS}: ${workerName} (${placement})...`);
     try {
-      return await runWrangler(["deploy", "--config", configPath, "--minify"], {
+      const output = await runWrangler(["deploy", "--config", configPath, "--minify"], {
         CLOUDFLARE_ACCOUNT_ID: accountId
       });
+      progress.log(`Finished Worker deploy attempt ${attempt}/${WORKER_DEPLOY_RETRY_ATTEMPTS}: ${workerName} (${placement}).`);
+      return output;
     } catch (error) {
       if (attempt >= WORKER_DEPLOY_RETRY_ATTEMPTS || !isRetryableWorkerDeployError(error)) {
         throw error;
       }
-      console.warn(
+      progress.warn(
         `Worker deploy failed while Cloudflare prepared bindings; retrying in ${Math.round(WORKER_DEPLOY_RETRY_DELAY_MS / 1000)}s (${attempt + 1}/${WORKER_DEPLOY_RETRY_ATTEMPTS})...`
       );
       await sleep(WORKER_DEPLOY_RETRY_DELAY_MS);
@@ -781,12 +984,20 @@ async function copyWorkerSource(rootDir, tempDir) {
   return targetPath;
 }
 
-async function runRequests({ worker, database, requests, queriesPerRequest, timeoutMs }) {
+async function runRequests({ worker, database, requests, queriesPerRequest, timeoutMs, progress }) {
   const results = [];
   for (let requestIndex = 0; requestIndex < requests; requestIndex += 1) {
+    const started = performance.now();
     results[requestIndex] = await callBench(worker, database, queriesPerRequest, timeoutMs);
+    progress.recordRequest(performance.now() - started);
   }
   return results;
+}
+
+function splitRequestsAcrossRounds(requests, rounds) {
+  const baseRequests = Math.floor(requests / rounds);
+  const extraRequests = requests % rounds;
+  return Array.from({ length: rounds }, (_, roundIndex) => baseRequests + (roundIndex < extraRequests ? 1 : 0));
 }
 
 async function callBench(worker, database, queriesPerRequest, timeoutMs) {
@@ -1082,7 +1293,7 @@ async function writeOutputs(resultsDir, raw) {
   await rm(path.join(resultsDir, "raw.partial.json"), { force: true });
 }
 
-async function buildAndOpenSite({ config, resultsDir, rootDir }) {
+async function buildAndOpenSite({ config, resultsDir, rootDir, progress }) {
   const inputPath = path.join(resultsDir, "raw.json");
   const args = [
     path.join(rootDir, "src", "build-html-site.mjs"),
@@ -1092,8 +1303,9 @@ async function buildAndOpenSite({ config, resultsDir, rootDir }) {
     config.siteOutputPath,
     config.openSiteAfterRun ? "--open" : "--no-open"
   ];
-  console.log(`Building benchmark report: ${config.siteOutputPath}`);
+  progress.log(`Starting benchmark report build: ${config.siteOutputPath}...`);
   await runCommand(process.execPath, args);
+  progress.log(`Finished benchmark report build: ${config.siteOutputPath}.`);
 }
 
 async function persistProgress(resultsDir, raw) {
@@ -1132,36 +1344,42 @@ function formatMs(value) {
   return isFiniteNumber(value) ? `${value.toFixed(2)}ms` : "n/a";
 }
 
-async function cleanupWorkers(workerNames, accountId) {
+async function cleanupWorkers(workerNames, accountId, progress) {
   for (const workerName of workerNames.slice().reverse()) {
     try {
-      console.log(`Deleting Worker ${workerName}...`);
+      const started = performance.now();
+      progress.log(`Starting Worker deletion: ${workerName}...`);
       await runWrangler(["delete", workerName, "--force"], {
         CLOUDFLARE_ACCOUNT_ID: accountId
       });
       await unregisterResource({ type: "worker", accountId, name: workerName });
+      progress.recordWorkerDelete(performance.now() - started);
+      progress.log(`Finished Worker deletion: ${workerName}.`);
     } catch (error) {
       if (isAlreadyDeletedError(error)) {
         await unregisterResource({ type: "worker", accountId, name: workerName });
       } else {
-        console.warn(`Could not delete Worker ${workerName}: ${error.message}`);
+        progress.warn(`Could not delete Worker ${workerName}: ${error.message}`);
       }
     }
   }
 }
 
-async function cleanupDatabase(databaseName, accountId) {
+async function cleanupDatabase(databaseName, accountId, progress) {
   try {
-    console.log(`Deleting disposable D1 database ${databaseName}...`);
+    const started = performance.now();
+    progress.log(`Starting disposable D1 database deletion: ${databaseName}...`);
     await runWrangler(["d1", "delete", databaseName, "--skip-confirmation"], {
       CLOUDFLARE_ACCOUNT_ID: accountId
     });
     await unregisterResource({ type: "d1", accountId, name: databaseName });
+    progress.recordD1Delete(performance.now() - started);
+    progress.log(`Finished disposable D1 database deletion: ${databaseName}.`);
   } catch (error) {
     if (isAlreadyDeletedError(error)) {
       await unregisterResource({ type: "d1", accountId, name: databaseName });
     } else {
-      console.warn(`Could not delete D1 database ${databaseName}: ${error.message}`);
+      progress.warn(`Could not delete D1 database ${databaseName}: ${error.message}`);
     }
   }
 }
