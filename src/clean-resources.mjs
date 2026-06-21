@@ -72,6 +72,7 @@ function matchesFilter(resource, filter) {
   if (filter.runId && resource.runId !== filter.runId) return false;
   if (filter.accountId && resource.accountId !== filter.accountId) return false;
   if (filter.type && resource.type !== filter.type) return false;
+  if (filter.scope && resource.metadata?.scope !== filter.scope) return false;
   if (filter.names && !filter.names.includes(resource.name)) return false;
   return true;
 }
@@ -243,6 +244,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") args.help = true;
+    else if (arg === "finder") args.scope = "finder";
     else if (arg === "--dry-run") args.dryRun = true;
     else if (arg === "--run-id") args.runId = requireValue(argv, ++i, arg);
     else if (arg === "--account-id") args.accountId = requireValue(argv, ++i, arg);
@@ -262,7 +264,9 @@ function requireValue(argv, index, flag) {
 function printHelp() {
   console.log(`Usage:
   npm run cleanup
+  npm run cleanup -- finder
   npm run cleanup -- --dry-run
+  npm run cleanup -- finder --dry-run
   npm run cleanup -- --run-id <run-id>
   npm run cleanup -- --account-id <account-id>
 
@@ -281,9 +285,10 @@ async function main() {
     return;
   }
 
-  const resources = await listResources({
+const resources = await listResources({
     runId: args.runId,
-    accountId: args.accountId
+    accountId: args.accountId,
+    scope: args.scope
   });
 
   if (resources.length === 0) {
@@ -300,7 +305,8 @@ async function main() {
   console.log(`Cleaning ${resources.length} tracked benchmark resources...`);
   const result = await cleanupTrackedResources({
     runId: args.runId,
-    accountId: args.accountId
+    accountId: args.accountId,
+    scope: args.scope
   });
   console.log(`Cleanup complete. Remaining tracked resources: ${result.remaining}`);
   if (result.remaining > 0) {

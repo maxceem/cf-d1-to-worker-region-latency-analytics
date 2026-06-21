@@ -1,7 +1,9 @@
 .benchmark-tmp/
+.finder-tmp/
 .benchmark-resources/
 results/
 results-*/
+docs-finder/
 node_modules/
 .env
 .dev.vars

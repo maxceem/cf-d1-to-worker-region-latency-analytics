@@ -5,7 +5,6 @@ const METRICS = window.MetricStats.METRICS.map(metric => [metric.key, metric.lab
 const DEFAULT_AGGREGATE_METRIC = window.MetricStats.DEFAULT_AGGREGATE_METRIC;
 const state = {
   filters: {},
-  rowMode: "pair",
   metric: DEFAULT_AGGREGATE_METRIC,
   sort: "networkMs",
   dir: 1,
@@ -22,9 +21,9 @@ const esc = Site.escapeHtml;
 const lerpColor = Site.latencyColor;
 
 function fmtMsValue(v) { return v == null ? "—" : v.toFixed(v < 10 ? 1 : 0); }
-// Global latency scale over the whole (unfiltered) dataset for the current row mode and
-// metric, so cell colors stay comparable no matter which filters are selected. The upper
-// bound is capped at the Tukey fence (q3 + 1.5·IQR) so a few outliers don't flatten the range.
+// Global latency scale over the whole dataset for the current metric, so cell colors
+// stay comparable no matter which filters are selected. The upper bound is capped at
+// the Tukey fence (q3 + 1.5·IQR) so a few outliers don't flatten the range.
 function networkScale() {
   const values = displayRows().map(row => row.networkMs).filter(v => v != null);
   if (!values.length) return { min: 0, max: 1, span: 1 };
@@ -58,8 +57,8 @@ function noteValues(row) {
 const FILTERS = {
   db: { label: "D1 target", values: row => [row.dbKey], text: dbLabel },
   placement: { label: "Worker target", values: row => [row.placement] },
-  placementColo: { label: "Worker placement colo", values: row => [labelValue(row.placementColo)] },
-  workerColo: { label: "Worker colo", values: row => [labelValue(row.workerColo)] },
+  placementColo: { label: "Worker placement colo", values: row => row.placementColoValues || [row.placementColo] },
+  workerColo: { label: "Worker colo", values: row => row.workerColoValues || [row.workerColo] },
   d1Region: { label: "D1 region", values: row => row.d1RegionValues || [row.d1Region] },
   d1Colo: { label: "D1 colo", values: row => row.d1ColoValues || [row.d1Colo] },
   note: { label: "Note", values: noteValues },
@@ -84,9 +83,24 @@ function anySelected() {
 }
 function countCategory(rows, key) {
   return rows.reduce((acc, row) => {
-    for (const value of filterValues(row, key)) acc[value] = (acc[value] || 0) + 1;
+    for (const [value, count] of filterCountEntries(row, key)) acc[value] = (acc[value] || 0) + count;
     return acc;
   }, {});
+}
+function filterCountEntries(row, key) {
+  if (key === "db") return filterValues(row, key).map(value => [value, row.measuredQueryCount || 0]);
+  if (key === "placement") return filterValues(row, key).map(value => [value, row.requestCount || 0]);
+  if (key === "placementColo") return countEntries(row.placementColoCounts, filterValues(row, key));
+  if (key === "workerColo") return countEntries(row.workerColoCounts, filterValues(row, key));
+  if (key === "d1Region") return countEntries(row.d1RegionCounts, filterValues(row, key));
+  if (key === "d1Colo") return countEntries(row.d1ColoCounts, filterValues(row, key));
+  if (key === "note") return countEntries(row.noteCounts, filterValues(row, key));
+  return filterValues(row, key).map(value => [value, 1]);
+}
+function countEntries(counts, fallbackValues) {
+  const entries = Object.entries(counts || {}).filter(([, count]) => Number(count) > 0);
+  if (entries.length) return entries.map(([value, count]) => [labelValue(value), Number(count)]);
+  return fallbackValues.map(value => [value, 1]);
 }
 function sortedCounts(counts) {
   return Object.entries(counts || {}).sort((a, b) => {
@@ -154,7 +168,6 @@ function modeBar() {
     attr,
   });
   return '<div class="raw-bar"><div class="raw-bar-modes">' +
-    seg("Group by", "data-row-mode", [["pair", "Worker target"], ["request", "Requests"], ["query", "Queries"]], state.rowMode) +
     seg("Metric", "data-raw-metric", METRICS, state.metric) +
     '</div>' +
     (anySelected() ? '<button class="raw-clear" type="button" data-clear-filters>Clear filters</button>' : "") +
@@ -191,7 +204,7 @@ function providerPills(key, counts) {
 
 function statRibbon() {
   if (!dataReady()) {
-    const total = (MODEL.rowCounts && MODEL.rowCounts[state.rowMode]) || 0;
+    const total = (MODEL.rowCounts && MODEL.rowCounts.rows) || 0;
     const progress = loadPercent();
     const fig = (label, value, head) => '<div class="raw-fig' + (head ? " head" : "") + '"><div class="v">' + value + '</div><div class="k">' + esc(label) + '</div></div>';
     return '<div class="raw-ribbon">' +
@@ -223,7 +236,7 @@ function rawTable() {
   const cols = [
     ["db", "D1 target"],
     ["placement", "Worker target"],
-    ["query", state.rowMode === "pair" ? "Requests" : "Query #"],
+    ["request", "Requests"],
     ["networkMs", "Network (ms)"],
     ["d1Region", "D1 region"],
     ["d1Colo", "D1 colo"],
@@ -231,7 +244,6 @@ function rawTable() {
     ["workerColo", "Worker colo"],
     ["note", "Note"],
   ];
-  if (state.rowMode !== "pair") cols.splice(2, 0, ["index", "Req #"]);
   const head = cols.map(([key, label]) =>
     '<th class="' + (key === "placement" ? "l" : "") + '" data-raw-sort="' + key + '">' +
       label + (state.sort === key ? (state.dir === 1 ? " ▲" : " ▼") : "") + '</th>'
@@ -256,7 +268,7 @@ function loadingOverlay() {
 
 function renderRawRows() {
   const rows = sortedRows(filteredRows());
-  const columns = state.rowMode === "pair" ? 9 : 10;
+  const columns = 9;
   const scale = networkScale();
   const rowMarkup = rows.map(row => rawRowHtml(row, scale));
   const empty = '<tr class="clusterize-no-data"><td colspan="' + columns + '" class="empty">No rows match the filters.</td></tr>';
@@ -284,14 +296,13 @@ function rawRowHtml(row, scale) {
   return '<tr class="raw-' + row.status + '">' +
     '<td>' + esc(row.dbLabel) + '</td>' +
     '<td class="l">' + esc(row.placement) + '</td>' +
-    (row.pairIndex == null ? '<td>' + esc(rowIndexLabel(row)) + '</td>' : '') +
-    '<td>' + esc(queryLabel(row)) + '</td>' +
+    '<td>' + esc(requestLabel(row)) + '</td>' +
     '<td class="raw-net">' + netCell(row.networkMs, scale) + '</td>' +
-    '<td>' + esc(row.d1Region || "—") + '</td>' +
-    '<td>' + esc(row.d1Colo || "—") + '</td>' +
-    '<td>' + esc(row.placementColo || "—") + '</td>' +
-    '<td>' + esc(row.workerColo || "—") + '</td>' +
-    '<td class="l raw-note">' + esc(row.note || "—") + '</td>' +
+    '<td>' + esc(row.d1Region || "-") + '</td>' +
+    '<td>' + esc(row.d1Colo || "-") + '</td>' +
+    '<td>' + esc(row.placementColo || "-") + '</td>' +
+    '<td>' + esc(row.workerColo || "-") + '</td>' +
+    '<td class="l raw-note">' + esc(row.note || "-") + '</td>' +
   '</tr>';
 }
 
@@ -311,100 +322,11 @@ function filteredRows(skipKey) {
 
 function displayRows() {
   if (!dataReady()) return [];
-  if (state.rowMode === "pair") return pairRows();
-  const queries = MODEL.rows;
-  return state.rowMode === "request" ? requestRows(queries) : queries;
+  return MODEL.rows.map(row => ({ ...row, networkMs: metricNetworkMs(row) }));
 }
 
-function pairRows() {
-  const grouped = new Map();
-  for (const row of MODEL.rows) {
-    const key = row.dbKey + "|" + row.placement;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push(row);
-  }
-  return [...grouped.values()].map((rowsForPair, pairIndex) => {
-    const first = rowsForPair[0];
-    const requests = groupByRequest(rowsForPair);
-    const networkValues = rowsForPair
-      .map(row => row.networkMs)
-      .filter(v => v != null);
-    const placementColoValues = unique(rowsForPair.map(row => row.placementColo).filter(Boolean));
-    const workerColoValues = unique(rowsForPair.map(row => row.workerColo).filter(Boolean));
-    const d1RegionValues = unique(rowsForPair.flatMap(row => row.d1RegionValues || [row.d1Region]).filter(Boolean));
-    const d1ColoValues = unique(rowsForPair.flatMap(row => row.d1ColoValues || [row.d1Colo]).filter(Boolean));
-    const noteValues = unique(rowsForPair.flatMap(row => row.notes || (row.note ? [row.note] : [])));
-    const minSuccessfulRequests = MODEL.run.minSuccessfulRequests || MODEL.run.benchmark?.minSuccessfulRequests || 1;
-    const successCount = requests.filter(rowsForRequest => rowsForRequest.some(row => row.status === "ok")).length;
-    return {
-      id: first.dbKey + "|" + first.placement,
-      pairIndex,
-      dbKey: first.dbKey,
-      dbLabel: first.dbLabel,
-      placement: first.placement,
-      requestIndex: null,
-      queryIndex: null,
-      status: successCount >= minSuccessfulRequests ? "ok" : "failed",
-      note: noteValues.join(", ") || null,
-      notes: noteValues,
-      networkMs: window.MetricStats.reduceMetric(networkValues, state.metric),
-      measuredQueryCount: networkValues.length,
-      successCount,
-      requestCount: requests.length,
-      placementColo: placementColoValues.join("+") || null,
-      workerColo: workerColoValues.join("+") || null,
-      d1Region: d1RegionValues.join("+") || null,
-      d1Colo: d1ColoValues.join("+") || null,
-      placementColoValues,
-      workerColoValues,
-      d1RegionValues,
-      d1ColoValues,
-      noteValues,
-    };
-  });
-}
-
-function groupByRequest(rows) {
-  const grouped = new Map();
-  for (const row of rows) {
-    const key = row.dbKey + "|" + row.placement + "|" + row.requestIndex;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push(row);
-  }
-  return [...grouped.values()];
-}
-
-function requestRows(rows) {
-  return groupByRequest(rows).map(rowsForRequest => {
-    const first = rowsForRequest[0];
-    const networkValues = rowsForRequest
-      .map(row => row.networkMs)
-      .filter(v => v != null);
-    const queryIndexes = rowsForRequest
-      .map(row => row.queryIndex)
-      .filter(v => v != null)
-      .sort((a, b) => a - b);
-    const d1RegionValues = unique(rowsForRequest.map(row => row.d1Region).filter(Boolean));
-    const d1ColoValues = unique(rowsForRequest.map(row => row.d1Colo).filter(Boolean));
-    const noteValues = unique(rowsForRequest.flatMap(row => row.notes || (row.note ? [row.note] : [])));
-    const status = rowsForRequest.some(row => row.status === "failed") ? "failed" : "ok";
-    return {
-      ...first,
-      id: first.dbKey + "|" + first.placement + "|" + first.requestIndex,
-      queryIndex: null,
-      queryIndexes,
-      queryLabel: queryRangeLabel(queryIndexes),
-      status,
-      networkMs: window.MetricStats.reduceMetric(networkValues, state.metric),
-      d1Region: d1RegionValues.join("+") || null,
-      d1Colo: d1ColoValues.join("+") || null,
-      d1RegionValues,
-      d1ColoValues,
-      note: noteValues.join(", ") || null,
-      noteValues,
-      measuredQueryCount: networkValues.length,
-    };
-  });
+function metricNetworkMs(row) {
+  return row.networkStats && row.networkStats[state.metric] != null ? row.networkStats[state.metric] : row.networkMs;
 }
 
 function sortedRows(rows) {
@@ -412,9 +334,8 @@ function sortedRows(rows) {
   const key = state.sort;
   return rows.slice().sort((a, b) => {
     let av, bv;
-    if (key === "index") { av = rowIndex(a); bv = rowIndex(b); }
-    else if (key === "db") { av = a.dbLabel; bv = b.dbLabel; }
-    else if (key === "query") { av = querySortValue(a); bv = querySortValue(b); }
+    if (key === "db") { av = a.dbLabel; bv = b.dbLabel; }
+    else if (key === "request") { av = requestSortValue(a); bv = requestSortValue(b); }
     else { av = a[key]; bv = b[key]; }
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
@@ -423,41 +344,11 @@ function sortedRows(rows) {
   });
 }
 
-function rowIndex(row) {
-  if (row.pairIndex != null) return String(row.pairIndex).padStart(4, "0");
-  return row.dbKey + row.placement + String(row.requestIndex).padStart(4, "0") + String(row.queryIndex ?? -1).padStart(4, "0");
+function requestSortValue(row) {
+  return row.requestCount || 0;
 }
-function rowIndexLabel(row) {
-  return row.pairIndex == null ? row.requestIndex + 1 : row.pairIndex + 1;
-}
-function querySortValue(row) {
-  if (row.pairIndex != null) return row.successCount || 0;
-  return row.queryIndexes && row.queryIndexes.length ? row.queryIndexes[0] : row.queryIndex == null ? -1 : row.queryIndex;
-}
-function queryLabel(row) {
-  if (row.pairIndex != null) return (row.successCount || 0) + "/" + (row.requestCount || 0);
-  if (row.queryLabel) return row.queryLabel;
-  if (row.queryIndex == null) return "—";
-  return String(row.queryIndex + 1);
-}
-function queryRangeLabel(indexes) {
-  if (!indexes.length) return "—";
-  const values = indexes.map(index => index + 1);
-  const ranges = [];
-  let start = values[0];
-  let prev = values[0];
-  for (let i = 1; i < values.length; i += 1) {
-    const value = values[i];
-    if (value === prev + 1) {
-      prev = value;
-      continue;
-    }
-    ranges.push(start === prev ? String(start) : start + "-" + prev);
-    start = value;
-    prev = value;
-  }
-  ranges.push(start === prev ? String(start) : start + "-" + prev);
-  return ranges.join(", ");
+function requestLabel(row) {
+  return (row.successCount || 0) + "/" + (row.requestCount || 0);
 }
 function unique(values) {
   return [...new Set(values.filter(v => v != null && v !== ""))].sort((a, b) => String(a).localeCompare(String(b)));
@@ -471,7 +362,7 @@ function loadPercent() {
 }
 function filterCounts(key) {
   if (dataReady()) return countCategory(filteredRows(key), key);
-  return (MODEL.filterFacets && MODEL.filterFacets[state.rowMode] && MODEL.filterFacets[state.rowMode][key]) || {};
+  return (MODEL.filterFacets && MODEL.filterFacets[key]) || {};
 }
 function updateLoadingProgress() {
   const percent = loadPercent();
@@ -505,12 +396,6 @@ function startDataLoad() {
   requestAnimationFrame(() => setTimeout(loadChunk, 0));
 }
 function wire() {
-  document.querySelectorAll("[data-row-mode]").forEach(button => {
-    button.onclick = () => {
-      state.rowMode = button.getAttribute("data-row-mode");
-      render();
-    };
-  });
   document.querySelectorAll("[data-raw-metric]").forEach(button => {
     button.onclick = () => {
       state.metric = button.getAttribute("data-raw-metric");

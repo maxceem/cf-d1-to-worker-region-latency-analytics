@@ -45,6 +45,16 @@ And then run benchmark using partial config:
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.json
 ```
 
+## Worker Region Finder
+
+Use the finder to benchmark Worker placements for an existing D1 database. It observes the D1 region, selects Worker placements from [data/finder/d1-provider-region-map.json](data/finder/d1-provider-region-map.json), writes results under `results-finder`, builds the report under `docs-finder`, and opens it.
+
+```bash
+CLOUDFLARE_API_TOKEN=... npm run finder -- --database-name "repostic-app-db-wnam"
+```
+
+The default finder config is [worker-region-finder.config.json](worker-region-finder.config.json).
+
 ## Cleanup
 
 Temporary resources are deleted after a normal run. If a run is interrupted and anything is left behind, clean up any stale resources with:
@@ -57,6 +67,12 @@ Preview tracked resources without deleting them:
 
 ```bash
 npm run cleanup -- --dry-run
+```
+
+Clean up only finder resources:
+
+```bash
+npm run cleanup -- finder
 ```
 
 ## License

@@ -232,9 +232,7 @@ function buildRawModel(raw) {
     if (!db) continue;
     for (const [placement, requests] of Object.entries(byPlacement || {})) {
       const measurements = getPairMeasurements({ requests, database: db });
-      requests.forEach((request, requestIndex) => {
-        rows.push(...rawQueryRows({ db, placement, request, requestIndex, measurements }));
-      });
+      rows.push(rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }));
     }
   }
 
@@ -253,62 +251,85 @@ function buildRawModel(raw) {
   };
 }
 
-function rawQueryRows({ db, placement, request, requestIndex, measurements }) {
-  const body = request?.body || {};
-  const ok = !!request?.ok && !!request?.body;
-  const notes = measurements.notes.get(request) || (ok ? [] : ["failed"]);
-  const status = ok ? "ok" : "failed";
-  const adjusted = ok ? adjustedTotalMs(body) : null;
-  const perQuery = ok ? adjustedPerQueryMs(body) : [];
-  const queryValues = perQuery
-    .map((value, queryIndex) => ({ value, queryIndex }))
-    .filter((entry) => isFiniteNumber(entry.value));
-  const rows = queryValues.length ? queryValues : [{ value: adjusted, queryIndex: null }];
+function rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }) {
+  const successful = measurements.successful;
+  const networkValues = successful.flatMap((request) => {
+    const adjusted = adjustedTotalMs(request.body);
+    const perQuery = adjustedPerQueryMs(request.body).filter(isFiniteNumber);
+    return perQuery.length ? perQuery : isFiniteNumber(adjusted) ? [adjusted] : [];
+  });
+  const networkStats = networkValues.length ? MetricStats.metricStats(networkValues) : MetricStats.emptyMetricStats();
+  const placementColoCounts = mergeCounts(requests.map((request) => ({ [countKey(request.placementColo)]: 1 })));
+  const workerColoCounts = mergeCounts(requests.map((request) => ({ [countKey(request.body?.workerColo)]: 1 })));
+  const d1RegionCounts = mergeCounts(successful.map((request) => cleanCounts(request.body.d1?.regions || {})));
+  const d1ColoCounts = mergeCounts(successful.map((request) => cleanCounts(request.body.d1?.colos || {})));
+  const noteValues = uniqueValues(Object.keys(measurements.noteCounts || {}));
+  const sqlDurations = successful
+    .flatMap((request) => request.body.d1?.sqlDurations || [])
+    .filter(isFiniteNumber);
+  const measuredQueryCount = sumCounts(d1RegionCounts) || sumCounts(d1ColoCounts) || networkValues.length;
+  const successCount = successful.length;
 
-  return rows.map(({ value, queryIndex }) => ({
-    id: `${db.key}|${placement}|${requestIndex}|${queryIndex == null ? "request" : queryIndex}`,
+  return {
+    id: `${db.key}|${placement}`,
     dbKey: db.key,
     dbLabel: db.observedRegion || db.label,
     d1TargetLocation: db.targetLocation,
     d1ObservedRegion: db.observedRegion,
     placement,
-    requestIndex,
-    queryIndex,
-    status,
-    note: notes.join(", ") || null,
-    notes,
-    measuredQueryCount: isFiniteNumber(value) ? 1 : 0,
-    httpStatus: request?.status || 0,
-    clientMs: numberOrNull(request?.clientMs),
-    workerColo: body.workerColo || null,
-    placementHeader: request?.placementHeader || null,
-    placementMode: request?.placementMode || null,
-    placementColo: request?.placementColo || null,
-    totalMs: numberOrNull(body.totalMs),
-    networkMs: numberOrNull(value),
-    requestNetworkMs: numberOrNull(adjusted),
-    queries: Number.isFinite(body.queries) ? body.queries : null,
-    d1Region: queryLocationValue(body.d1?.regions, queryIndex),
-    d1Colo: queryLocationValue(body.d1?.colos, queryIndex),
-    d1Regions: body.d1?.regions || {},
-    d1Colos: body.d1?.colos || {},
-    sqlMs: average((body.d1?.sqlDurations || []).filter(isFiniteNumber)),
-    error: request?.error || null,
-  }));
+    status: isPairReliable(successCount, minSuccessfulRequests) ? "ok" : "failed",
+    note: noteValues.join(", ") || null,
+    noteValues,
+    noteCounts: measurements.noteCounts || {},
+    measuredQueryCount,
+    successCount,
+    requestCount: requests.length,
+    errorCount: measurements.failed.length,
+    placementColo: countMapLabel(placementColoCounts),
+    workerColo: countMapLabel(workerColoCounts),
+    placementColoValues: Object.keys(placementColoCounts),
+    workerColoValues: Object.keys(workerColoCounts),
+    placementColoCounts,
+    workerColoCounts,
+    networkMs: numberOrNull(networkStats[DEFAULT_AGGREGATE_METRIC]),
+    networkStats,
+    d1Region: countMapLabel(d1RegionCounts),
+    d1Colo: countMapLabel(d1ColoCounts),
+    d1RegionValues: Object.keys(d1RegionCounts),
+    d1ColoValues: Object.keys(d1ColoCounts),
+    d1RegionCounts,
+    d1ColoCounts,
+    avgSqlMs: average(sqlDurations),
+  };
 }
 
-function queryLocationValue(counts, queryIndex) {
-  const entries = Object.entries(counts || {});
-  if (!entries.length) return null;
-  if (entries.length === 1) return entries[0][0];
-  if (queryIndex != null) {
-    let offset = queryIndex;
-    for (const [value, count] of entries) {
-      offset -= count;
-      if (offset < 0) return value;
-    }
+function cleanCounts(counts) {
+  const result = {};
+  for (const [key, value] of Object.entries(counts || {})) {
+    const count = Number(value) || 0;
+    if (count <= 0) continue;
+    const label = countKey(key);
+    result[label] = (result[label] || 0) + count;
   }
-  return entries.map(([value]) => value).join("+");
+  return result;
+}
+
+function sumCounts(counts) {
+  return Object.values(counts || {}).reduce((sum, count) => sum + (Number(count) || 0), 0);
+}
+
+function countMapLabel(counts) {
+  const entries = Object.entries(counts || {})
+    .filter(([, count]) => Number(count) > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (!entries.length) return "-";
+  if (entries.length === 1) return entries[0][0];
+  return entries.map(([value, count]) => `${value}:${count}`).join(",");
+}
+
+function countKey(value) {
+  if (value == null || value === "" || value === "undefined" || value === "null") return "-";
+  return String(value);
 }
 
 function serializeBenchmarkConfig(benchmark) {
@@ -506,18 +527,12 @@ function safeJson(value) {
 
 function rawRowCounts(rows) {
   return {
-    pair: rawPairRows(rows).length,
-    request: rawRequestRows(rows).length,
-    query: rows.length,
+    rows: rows.length,
   };
 }
 
 function rawFilterFacets(rows) {
-  return {
-    pair: rawFacetCounts(rawPairRows(rows)),
-    request: rawFacetCounts(rawRequestRows(rows)),
-    query: rawFacetCounts(rows),
-  };
+  return rawFacetCounts(rows);
 }
 
 function rawFacetCounts(rows) {
@@ -527,94 +542,34 @@ function rawFacetCounts(rows) {
   }
   for (const row of rows) {
     for (const key of Object.keys(result)) {
-      for (const value of rawFilterValues(row, key)) {
-        result[key][value] = (result[key][value] || 0) + 1;
+      for (const [value, count] of rawFilterEntries(row, key)) {
+        result[key][value] = (result[key][value] || 0) + count;
       }
     }
   }
   return result;
 }
 
-function rawFilterValues(row, key) {
-  let values = [];
-  if (key === "db") values = [row.dbKey];
-  else if (key === "placement") values = [row.placement];
-  else if (key === "placementColo") values = [row.placementColo];
-  else if (key === "workerColo") values = [row.workerColo];
-  else if (key === "d1Region") values = row.d1RegionValues || [row.d1Region];
-  else if (key === "d1Colo") values = row.d1ColoValues || [row.d1Colo];
-  else if (key === "note") values = rawNoteValues(row);
-  return values.map(rawLabelValue);
+function rawFilterEntries(row, key) {
+  if (key === "db") return [[rawLabelValue(row.dbKey), row.measuredQueryCount || 0]];
+  if (key === "placement") return [[rawLabelValue(row.placement), row.requestCount || 0]];
+  if (key === "placementColo") return rawCountEntries(row.placementColoCounts, row.placementColoValues || [row.placementColo]);
+  if (key === "workerColo") return rawCountEntries(row.workerColoCounts, row.workerColoValues || [row.workerColo]);
+  if (key === "d1Region") return rawCountEntries(row.d1RegionCounts, row.d1RegionValues || [row.d1Region]);
+  if (key === "d1Colo") return rawCountEntries(row.d1ColoCounts, row.d1ColoValues || [row.d1Colo]);
+  if (key === "note") return rawCountEntries(row.noteCounts, row.noteValues?.length ? row.noteValues : [row.note]);
+
+  return [];
+}
+
+function rawCountEntries(counts, fallbackValues) {
+  const entries = Object.entries(counts || {}).filter(([, count]) => Number(count) > 0);
+  if (entries.length) return entries.map(([value, count]) => [rawLabelValue(value), Number(count)]);
+  return fallbackValues.map((value) => [rawLabelValue(value), 1]);
 }
 
 function rawLabelValue(value) {
   return value == null || value === "" ? "(none)" : String(value);
-}
-
-function rawNoteValues(row) {
-  const values = row.noteValues || row.notes || (row.note ? [row.note] : []);
-  return values.length ? values : [null];
-}
-
-function rawPairRows(rows) {
-  const grouped = new Map();
-  for (const row of rows) {
-    const key = row.dbKey + "|" + row.placement;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push(row);
-  }
-  return [...grouped.values()].map((rowsForPair) => {
-    const first = rowsForPair[0];
-    const networkValues = rowsForPair.map(row => row.networkMs).filter(value => value != null);
-    const placementColoValues = uniqueValues(rowsForPair.map(row => row.placementColo).filter(Boolean));
-    const workerColoValues = uniqueValues(rowsForPair.map(row => row.workerColo).filter(Boolean));
-    const d1RegionValues = uniqueValues(rowsForPair.flatMap(row => row.d1RegionValues || [row.d1Region]).filter(Boolean));
-    const d1ColoValues = uniqueValues(rowsForPair.flatMap(row => row.d1ColoValues || [row.d1Colo]).filter(Boolean));
-    const noteValues = uniqueValues(rowsForPair.flatMap(row => row.notes || (row.note ? [row.note] : [])));
-    return {
-      dbKey: first.dbKey,
-      placement: first.placement,
-      placementColo: placementColoValues.join("+") || null,
-      workerColo: workerColoValues.join("+") || null,
-      d1Region: d1RegionValues.join("+") || null,
-      d1Colo: d1ColoValues.join("+") || null,
-      placementColoValues,
-      workerColoValues,
-      d1RegionValues,
-      d1ColoValues,
-      noteValues,
-      note: noteValues.join(", ") || null,
-      networkMs: MetricStats.reduceMetric(networkValues, DEFAULT_AGGREGATE_METRIC),
-    };
-  });
-}
-
-function rawRequestRows(rows) {
-  return rawGroupByRequest(rows).map((rowsForRequest) => {
-    const first = rowsForRequest[0];
-    const d1RegionValues = uniqueValues(rowsForRequest.map(row => row.d1Region).filter(Boolean));
-    const d1ColoValues = uniqueValues(rowsForRequest.map(row => row.d1Colo).filter(Boolean));
-    const noteValues = uniqueValues(rowsForRequest.flatMap(row => row.notes || (row.note ? [row.note] : [])));
-    return {
-      ...first,
-      d1Region: d1RegionValues.join("+") || null,
-      d1Colo: d1ColoValues.join("+") || null,
-      d1RegionValues,
-      d1ColoValues,
-      note: noteValues.join(", ") || null,
-      noteValues,
-    };
-  });
-}
-
-function rawGroupByRequest(rows) {
-  const grouped = new Map();
-  for (const row of rows) {
-    const key = row.dbKey + "|" + row.placement + "|" + row.requestIndex;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push(row);
-  }
-  return [...grouped.values()];
 }
 
 function uniqueValues(values) {

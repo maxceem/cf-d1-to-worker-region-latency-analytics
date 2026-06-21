@@ -1,0 +1,25 @@
+{
+  "accountId": "",
+  "d1ObservationQueries": 3,
+  "workerNamePrefix": "d1-worker-region-finder",
+  "workerCompatibilityDate": "2026-06-21",
+  "workerCompatibilityFlags": [],
+  "workerObservabilityEnabled": true,
+  "benchmark": {
+    "warmupRequests": 3,
+    "measuredRequests": 30,
+    "minSuccessfulRequests": 10,
+    "queriesPerRequest": 5,
+    "requestTimeoutMs": 30000
+  },
+  "maxWorkersPerBatch": 35,
+  "propagationSeconds": 20,
+  "cleanupWorkers": true,
+  "workerDeployRetry": {
+    "attempts": 4,
+    "delayMs": 5000
+  },
+  "resultsDir": "results-finder",
+  "siteOutputPath": "docs-finder/index.html",
+  "openSiteAfterRun": true
+}
