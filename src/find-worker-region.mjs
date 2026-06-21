@@ -28,7 +28,6 @@ async function main() {
   }
 
   const startedAt = new Date();
-  const runId = toRunId(startedAt);
   const config = await loadConfig(args);
   const databaseSelector = resolveDatabaseSelector(args);
   validateConfig(config);
@@ -36,6 +35,7 @@ async function main() {
   const auth = readAuthFromEnv();
   const accountId = await resolveAccountId(auth, config.accountId);
   const database = await resolveDatabase(auth, accountId, databaseSelector);
+  const runId = makeRunId(database.name, startedAt);
   const databaseKey = makeDatabaseKey(database.name);
   const observation = await observeD1(auth, accountId, database.id, config.d1ObservationQueries);
   const providerRegionMap = await loadProviderRegionMap();
@@ -158,7 +158,9 @@ async function main() {
     await writeFile(path.join(resultsDir, "raw.json"), `${JSON.stringify(raw, null, 2)}\n`, "utf8");
     await writeFile(path.join(resultsDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
     await rm(path.join(resultsDir, "raw.partial.json"), { force: true });
-    await buildAndOpenSite({ config, resultsDir });
+    if (!args.noSite) {
+      await buildAndOpenSite({ resultsDir, open: !args.noOpen });
+    }
     printSummary(summary, resultsDir);
   } finally {
     await persistPartialIfNeeded(resultsDir, raw);
@@ -178,6 +180,8 @@ function parseArgs(argv) {
     else if (arg === "--config" || arg === "-c") args.config = nextValue(argv, ++index, arg);
     else if (arg === "--database-id") args.databaseId = nextValue(argv, ++index, arg);
     else if (arg === "--database-name") args.databaseName = nextValue(argv, ++index, arg);
+    else if (arg === "--no-site") args.noSite = true;
+    else if (arg === "--no-open") args.noOpen = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
@@ -220,9 +224,7 @@ function validateConfig(config) {
     "propagationSeconds",
     "cleanupWorkers",
     "workerDeployRetry",
-    "resultsDir",
-    "siteOutputPath",
-    "openSiteAfterRun"
+    "resultsDir"
   ]);
   for (const key of Object.keys(config)) {
     if (!allowedConfigFields.has(key)) {
@@ -252,8 +254,6 @@ function validateConfig(config) {
   }
   requireBoolean(config.cleanupWorkers, "cleanupWorkers");
   requireString(config.resultsDir, "resultsDir");
-  requireString(config.siteOutputPath, "siteOutputPath");
-  requireBoolean(config.openSiteAfterRun, "openSiteAfterRun");
   requirePlainObject(config.workerDeployRetry, "workerDeployRetry");
   requirePositiveInteger(config.workerDeployRetry.attempts, "workerDeployRetry.attempts");
   requirePositiveInteger(config.workerDeployRetry.delayMs, "workerDeployRetry.delayMs");
@@ -590,19 +590,20 @@ function printSummary(summary, resultsDir) {
   console.log(`Wrote ${path.join(resultsDir, "raw.json")}`);
 }
 
-async function buildAndOpenSite({ config, resultsDir }) {
+async function buildAndOpenSite({ resultsDir, open }) {
   const inputPath = path.join(resultsDir, "raw.json");
+  const outputPath = path.join(resultsDir, "site", "index.html");
   const args = [
     path.join(SCRIPT_DIR, "build-html-site.mjs"),
     "--input",
     inputPath,
     "--output",
-    config.siteOutputPath,
-    config.openSiteAfterRun ? "--open" : "--no-open"
+    outputPath,
+    open ? "--open" : "--no-open"
   ];
-  log(`Building finder report: ${config.siteOutputPath}.`);
+  log(`Building finder report: ${outputPath}.`);
   await runCommand(process.execPath, args);
-  log(`Finished finder report: ${config.siteOutputPath}.`);
+  log(`Finished finder report: ${outputPath}.`);
 }
 
 async function cleanupWorkers(workerNames, accountId) {
@@ -911,8 +912,20 @@ function isAlreadyDeletedError(error) {
   return text.includes("does not exist") || text.includes("not found") || text.includes("could not find") || text.includes("code: 10090");
 }
 
-function toRunId(date) {
-  return date.toISOString().replace(/[:.]/g, "-");
+function makeRunId(databaseName, date) {
+  return `${sanitizeWorkerName(databaseName) || "database"}-${formatLocalDateTime(date)}`;
+}
+
+function formatLocalDateTime(date) {
+  const parts = [
+    date.getFullYear(),
+    date.getMonth() + 1,
+    date.getDate(),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds()
+  ];
+  return parts.map((part) => String(part).padStart(2, "0")).join("-");
 }
 
 function formatMs(value) {
@@ -947,6 +960,8 @@ Options:
   -c, --config <path>        JSON config file. Defaults to worker-region-finder.config.json.
       --database-id <id>     Existing D1 database ID.
       --database-name <name> Existing D1 database name.
+      --no-site              Do not build the finder report.
+      --no-open              Build the finder report without opening it.
       --help                 Show this help.
 `);
 }

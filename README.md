@@ -47,13 +47,15 @@ CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.
 
 ## Worker Region Finder
 
-Use the finder to benchmark Worker placements for an existing D1 database. It observes the D1 region, selects Worker placements from [data/finder/d1-provider-region-map.json](data/finder/d1-provider-region-map.json), writes results under `results-finder`, builds the report under `docs-finder`, and opens it.
+Use the finder to benchmark Worker placements for an existing D1 database. It observes the D1 region, selects Worker placements from [data/finder/d1-provider-region-map.json](data/finder/d1-provider-region-map.json), writes results under `results-finder/<database-name>-<date-time>`, builds the report in that run folder under `site`, and opens it.
 
 ```bash
 CLOUDFLARE_API_TOKEN=... npm run finder -- --database-name "repostic-app-db-wnam"
 ```
 
 The default finder config is [worker-region-finder.config.json](worker-region-finder.config.json).
+
+Use `--no-site` to skip report generation, or `--no-open` to build the report without opening it.
 
 ## Cleanup
 

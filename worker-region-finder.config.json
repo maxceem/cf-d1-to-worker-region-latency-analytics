@@ -19,7 +19,5 @@
     "attempts": 4,
     "delayMs": 5000
   },
-  "resultsDir": "results-finder",
-  "siteOutputPath": "docs-finder/index.html",
-  "openSiteAfterRun": true
+  "resultsDir": "results-finder"
 }
