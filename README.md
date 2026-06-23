@@ -16,7 +16,13 @@ This benchmark measures the latency between D1 and a Worker when that Worker is 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/), writes results to `results/raw.json`, builds the static report, and opens it.
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/). Each discovery wave tries to find one new D1 colocation per D1 location, retrying already tested colocations until `databaseDiscoveryAttemptsPerRegion` is exhausted for that location. Newly observed D1 colocations are benchmarked against every Worker batch, then results are written under `results/<date-time>/raw.json`, the static report is built, and opened.
+
+Resume an incomplete run by passing its results folder:
+
+```bash
+CLOUDFLARE_API_TOKEN=... npm run benchmark -- --resume results/2026-06-22_10-14-03_UTC
+```
 
 The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 

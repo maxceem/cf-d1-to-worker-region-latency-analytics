@@ -4,6 +4,7 @@ const METRICS = window.MetricStats.METRICS;
 const DEFAULT_AGGREGATE_METRIC = window.MetricStats.DEFAULT_AGGREGATE_METRIC;
 const state = { db: (MODEL.databases[0] && MODEL.databases[0].key) || "all",
   metric: DEFAULT_AGGREGATE_METRIC, sort: "metric", dir: 1, matrixSort: DEFAULT_AGGREGATE_METRIC, matrixDir: 1, regionView: "list",
+  d1ColoByDb: {},
   heroM: { 1: DEFAULT_AGGREGATE_METRIC, 2: DEFAULT_AGGREGATE_METRIC, 3: DEFAULT_AGGREGATE_METRIC, 4: DEFAULT_AGGREGATE_METRIC,
            5: DEFAULT_AGGREGATE_METRIC, 6: DEFAULT_AGGREGATE_METRIC, 7: DEFAULT_AGGREGATE_METRIC, 8: DEFAULT_AGGREGATE_METRIC,
            9: DEFAULT_AGGREGATE_METRIC, 10: DEFAULT_AGGREGATE_METRIC, 11: DEFAULT_AGGREGATE_METRIC, 12: DEFAULT_AGGREGATE_METRIC,
@@ -40,6 +41,9 @@ function sortedCountEntries(obj) {
   return Object.entries(obj || {})
     .filter(([key, value]) => key && Number(value) > 0)
     .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]));
+}
+function unique(values) {
+  return [...new Set(values.filter(value => value != null && value !== ""))].sort((a, b) => String(a).localeCompare(String(b)));
 }
 function placementColoEntries(item) {
   const entries = sortedCountEntries(item.placementColos);
@@ -102,26 +106,46 @@ function dbColoLabel(key) {
   return colos.length ? colos.join(", ") : d?.d1Colo || "";
 }
 function dbLabelText(key) {
-  const region = dbRegionLabel(key);
-  const colo = dbColoLabel(key);
-  return colo ? region + " / " + colo : region;
+  return dbRegionLabel(key);
 }
 function dbLabelHtml(key) {
-  const region = esc(dbRegionLabel(key));
-  const colo = dbColoLabel(key);
-  return colo ? region + ' <span class="d1-colo">/ ' + esc(colo) + '</span>' : region;
+  return esc(dbRegionLabel(key));
 }
 function dbSvgLabel(key) {
-  const region = esc(dbRegionLabel(key));
-  const colo = dbColoLabel(key);
-  return colo ? region + '<tspan class="md1colo"> / ' + esc(colo) + '</tspan>' : region;
+  return esc(dbRegionLabel(key));
 }
 function dbCoord(key) {
-  const colo = dbColoLabel(key).split(",")[0].trim();
-  return colo ? (MODEL.coloCoords || {})[colo] || (MODEL.d1coords || {})[(key || "").toLowerCase()] : (MODEL.d1coords || {})[(key || "").toLowerCase()];
+  return (MODEL.d1coords || {})[(key || "").toLowerCase()];
 }
 function dbLabel(key) {
   return dbLabelText(key);
+}
+function d1ColoText(pair) {
+  return pair?.d1Colo || (pair?.d1ColoKey && pair.d1ColoKey !== "unknown" ? pair.d1ColoKey : "");
+}
+function pairD1LabelText(pair) {
+  const colo = d1ColoText(pair);
+  return colo ? dbLabelText(pair.dbKey) + " / " + colo : dbLabelText(pair.dbKey);
+}
+function pairD1LabelHtml(pair) {
+  const colo = d1ColoText(pair);
+  return colo ? dbLabelHtml(pair.dbKey) + ' <span class="d1-colo">/ ' + esc(colo) + '</span>' : dbLabelHtml(pair.dbKey);
+}
+function pairRouteHtml(pair) {
+  return '<span class="route-d1">' + pairD1LabelHtml(pair) + '</span> → ' + placementLabelHtml(pair);
+}
+function pairRouteText(pair) {
+  return pairD1LabelText(pair) + " -> " + placementLabelText(pair);
+}
+function d1CoordForPair(pair) {
+  const colo = d1ColoText(pair);
+  if (colo && (MODEL.coloCoords || {})[colo]) return (MODEL.coloCoords || {})[colo];
+  return dbCoord(pair.dbKey);
+}
+function d1CoordForDb(d) {
+  const colo = d && (d.d1Colo || d.observedColo);
+  if (colo && (MODEL.coloCoords || {})[colo]) return (MODEL.coloCoords || {})[colo];
+  return dbCoord(d.key);
 }
 
 function render() {
@@ -582,7 +606,7 @@ function heroV11() {
   for (const e of entries) {
     const has = !!e.best;
     const col = has ? metricColor(e.best.value, scale) : "#3a4654";
-    const ll = dbCoord(e.key);
+    const ll = has ? d1CoordForPair(e.best.pair) : dbCoord(e.key);
     let map = "";
     if (ll && B) {
       const cx = (ll[1] + 180) / 360 * B.w;
@@ -652,7 +676,7 @@ function cartoSpot(ver, schemeCls, kicker) {
         '<div class="v12name">' + (e.nameHtml || esc(e.name)) + '</div>' +
         '<div class="v12foot">' +
           '<div class="v12val"' + (col ? ' style="color:' + col + '"' : '') + '>' + (has ? fmtNum(e.best.value) : "—") + '<span>ms</span></div>' +
-          '<div class="v12loc">' + (has ? placementLabelHtml(e.best.pair) : "no data") + '</div>' +
+          '<div class="v12loc">' + (has ? pairRouteHtml(e.best.pair) : "no data") + '</div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -727,9 +751,9 @@ function matrixPanel() {
       const t = (best.value - r.lo) / r.span;
       const bg = lerpColor(t);
       rows += '<td class="cell' + sorted + '" style="background:' + bg + '22" title="' +
-        esc(dbLabelText(d.key)) + ' — best one-query ' + esc(m.label) + ': ' + fmt(best.value) + ' via ' + esc(placementLabelText(best.pair)) + '">' +
+        esc(dbLabelText(d.key)) + ' — best one-query ' + esc(m.label) + ': ' + fmt(best.value) + ' via ' + esc(pairRouteText(best.pair)) + '">' +
         '<span class="v" style="color:' + bg + '">' + fmtNum(best.value) + '</span>' +
-        '<span class="loc">' + placementLabelHtml(best.pair) + '</span></td>';
+        '<span class="loc">' + pairRouteHtml(best.pair) + '</span></td>';
     }
     rows += '</tr>';
   }
@@ -785,12 +809,12 @@ function globalTablePanel() {
     { key: "errorCount", label: "Errors" },
   ];
   const pairs = sortedPairs(MODEL.pairs);
-  const bestKey = MODEL.best ? MODEL.best.dbKey + "|" + MODEL.best.placement : null;
+  const bestKey = MODEL.best ? MODEL.best.dbKey + "|" + MODEL.best.d1ColoKey + "|" + MODEL.best.placement : null;
   let rows = "";
   for (const p of pairs) {
-    const isBest = bestKey === p.dbKey + "|" + p.placement;
+    const isBest = bestKey === p.dbKey + "|" + p.d1ColoKey + "|" + p.placement;
     rows += '<tr class="' + (isBest ? "best" : "") + (p.status === "failed" ? " failed" : "") + '">' +
-      '<td class="l"><span class="tag d1">' + dbLabelHtml(p.dbKey) + '</span></td>' +
+      '<td class="l"><span class="tag d1">' + pairD1LabelHtml(p) + '</span></td>' +
       '<td class="l"><span class="tag wk">' + placementLabelHtml(p) + '</span>' + (isBest ? ' <span class="tag win">best</span>' : '') + '</td>' +
       '<td class="metric">' + fmt(metricVal(p)) + '</td>' +
       '<td>' + fmt(p.avg) + '</td>' +
@@ -811,7 +835,10 @@ function regionPanel() {
   if (state.db === "all") return allRegionPanel();
 
   const d = MODEL.databases.find(x => x.key === state.db);
-  const pairs = MODEL.pairs.filter(p => p.dbKey === state.db);
+  const allPairs = MODEL.pairs.filter(p => p.dbKey === state.db && metricVal(p) != null);
+  const coloKeys = unique(allPairs.map(p => p.d1ColoKey || "unknown"));
+  const selectedColo = selectedD1Colo(d, allPairs, coloKeys);
+  const pairs = allPairs.filter(p => (p.d1ColoKey || "unknown") === selectedColo);
   const usable = pairs.filter(p => metricVal(p) != null);
   if (!usable.length) {
     return '<div class="panel"><div class="empty">No successful measurements for this D1 region.</div></div>';
@@ -821,11 +848,36 @@ function regionPanel() {
 
   const scale = metricScale();
   const bars = pairBars(ranked, winner, false, scale);
+  const selectedDb = (d.colocations || []).find(item => item.coloKey === selectedColo) || d;
 
-  return '<div class="mapwrap full"><div class="map-name">' + dbLabelHtml(d.key) + '</div>' +
-      regionMap(d, ranked, scale) + '</div>' +
-    '<div class="list-title">' + dbLabelHtml(d.key) + ' to worker locations</div>' +
+  return '<div class="mapwrap full"><div class="map-name">' + pairD1LabelHtml(winner) + '</div>' +
+      regionMap(selectedDb, ranked, scale) + '</div>' +
+    d1ColoTabs(d, coloKeys, selectedColo, allPairs) +
+    '<div class="list-title">' + pairD1LabelHtml(winner) + ' to worker locations</div>' +
     '<div class="bars">' + bars + '</div>';
+}
+
+function selectedD1Colo(d, pairs, coloKeys) {
+  const current = state.d1ColoByDb[d.key];
+  if (current && coloKeys.includes(current)) return current;
+  const best = pairs.slice().sort((a, b) => metricVal(a) - metricVal(b))[0];
+  const selected = best?.d1ColoKey || coloKeys[0] || "unknown";
+  state.d1ColoByDb[d.key] = selected;
+  return selected;
+}
+
+function d1ColoTabs(d, coloKeys, selectedColo, pairs) {
+  const buttons = coloKeys.map(coloKey => {
+    const best = pairs.filter(p => (p.d1ColoKey || "unknown") === coloKey).slice().sort((a, b) => metricVal(a) - metricVal(b))[0];
+    const label = coloKey === "unknown" ? "Unknown" : coloKey;
+    const suffix = best ? '<span class="d1loc-best">' + fmt(metricVal(best)) + '</span>' : "";
+    return '<button class="d1loc-tab' + (selectedColo === coloKey ? " active" : "") + '" type="button" data-d1-colo="' + esc(coloKey) + '">' +
+      '<span>' + esc(label) + '</span>' + suffix + '</button>';
+  }).join("");
+  return '<div class="d1loc-panel">' +
+    '<div class="d1loc-label">' + dbLabelHtml(d.key) + ' database locations</div>' +
+    '<div class="d1loc-tabs">' + buttons + '</div>' +
+  '</div>';
 }
 
 function allRegionPanel() {
@@ -868,8 +920,8 @@ function pairBars(pairs, winner, includeDb, scale) {
     const t = Math.min(1, (v - scale.gMin) / scale.span);
     const col = lerpColor(t);
     const isBest = p === winner;
-    const name = includeDb ? dbLabelText(p.dbKey) + " → " + placementLabelText(p) : placementLabelText(p);
-    const nameHtml = includeDb ? dbLabelHtml(p.dbKey) + " → " + placementLabelHtml(p) : placementLabelHtml(p);
+    const name = includeDb ? pairRouteText(p) : placementLabelText(p);
+    const nameHtml = includeDb ? pairRouteHtml(p) : placementLabelHtml(p);
     const fillStyle = over ? 'width:100%' : 'width:' + w + '%;background:' + col;
     const fillInner = over ? '<span class="over-label">off scale &#8250;&#8250;</span>' : '';
     bars += '<div class="barrow ' + (isBest ? "best" : "") + '">' +
@@ -887,7 +939,7 @@ function regionMap(d, ranked, scale) {
   const B = MODEL.basemap;
   if (!B) return '<div class="empty">No basemap available.</div>';
   const W = B.w, H = B.h;
-  const d1ll = dbCoord(d.key);
+  const d1ll = d1CoordForDb(d);
   let land = "";
   for (const path of B.paths) land += '<path class="mland" d="' + path + '"/>';
   // Crop the empty polar bands (above ~80°N / below ~58°S) so the full-width
@@ -927,7 +979,7 @@ function allRegionMap(pairs, scale) {
   let arcs = "", dots = "", d1s = "";
   const byPlacement = {};
   for (const p of pairs) {
-    const d1ll = dbCoord(p.dbKey);
+    const d1ll = d1CoordForPair(p);
     const c = observedPlaceCoord(p);
     if (!d1ll || !c) continue;
     const d1pt = projXY(d1ll[0], d1ll[1], W, H);
@@ -939,7 +991,7 @@ function allRegionMap(pairs, scale) {
       byPlacement[p.placement] = { placement: p.placement, pt: pt, values: [], placementColos: {}, noteCounts: {} };
     }
     mergePairColos(byPlacement[p.placement], p);
-    byPlacement[p.placement].values.push({ dbKey: p.dbKey, placement: p.placement, value: v });
+    byPlacement[p.placement].values.push({ dbKey: p.dbKey, d1ColoKey: p.d1ColoKey, d1Colo: p.d1Colo, placement: p.placement, value: v });
   }
   for (const entry of Object.values(byPlacement)) {
     entry.values.sort((a, b) => a.value - b.value);
@@ -957,14 +1009,17 @@ function allRegionMap(pairs, scale) {
       esc(JSON.stringify(tipRows)) + '"></circle>';
   }
   for (const d of MODEL.databases) {
-    const d1ll = dbCoord(d.key);
-    if (!d1ll) continue;
-    const pt = projXY(d1ll[0], d1ll[1], W, H);
-    d1s += '<circle class="md1halo" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="20"></circle>' +
-      '<circle class="md1" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="9">' +
-      '<title>D1 ' + esc(dbLabelText(d.key)) + '</title></circle>' +
-      '<text class="md1label" x="' + (pt[0] + 14).toFixed(1) + '" y="' + (pt[1] - 12).toFixed(1) + '">' +
-      dbSvgLabel(d.key) + '</text>';
+    for (const colocatedDb of d.colocations || [d]) {
+      const d1ll = d1CoordForDb(colocatedDb);
+      if (!d1ll) continue;
+      const pt = projXY(d1ll[0], d1ll[1], W, H);
+      const label = colocatedDb.d1Colo ? dbSvgLabel(d.key) + '<tspan class="md1colo"> / ' + esc(colocatedDb.d1Colo) + '</tspan>' : dbSvgLabel(d.key);
+      d1s += '<circle class="md1halo" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="20"></circle>' +
+        '<circle class="md1" cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="9">' +
+        '<title>D1 ' + esc(colocatedDb.d1Colo ? dbLabelText(d.key) + " / " + colocatedDb.d1Colo : dbLabelText(d.key)) + '</title></circle>' +
+        '<text class="md1label" x="' + (pt[0] + 14).toFixed(1) + '" y="' + (pt[1] - 12).toFixed(1) + '">' +
+        label + '</text>';
+    }
   }
   return '<svg class="regionmap" viewBox="' + vb + '" preserveAspectRatio="xMidYMid meet">' +
     '<g>' + land + '</g>' + arcs + dots + d1s + '</svg>';
@@ -1000,6 +1055,13 @@ function wire() {
 }
 
 function wireRegionPanel() {
+  document.querySelectorAll("[data-d1-colo]").forEach(button => {
+    button.onclick = () => {
+      if (state.db === "all") return;
+      state.d1ColoByDb[state.db] = button.getAttribute("data-d1-colo");
+      renderRegionPanel();
+    };
+  });
   // Custom tooltip for worker dots on the map.
   const map = document.querySelector(".regionmap");
   const tip = document.getElementById("maptip");
@@ -1015,7 +1077,7 @@ function wireRegionPanel() {
           msEl.innerHTML = t.getAttribute("data-region-html") || esc(t.getAttribute("data-region") || "Worker region");
           locEl.innerHTML = '<div class="maptip-list">' + rows.map(row =>
             '<div class="maptip-row">' +
-              '<span class="maptip-d1">' + dbLabelHtml(row.dbKey) + '</span>' +
+              '<span class="maptip-d1">' + dbLabelHtml(row.dbKey) + (row.d1Colo ? ' <span class="d1-colo">/ ' + esc(row.d1Colo) + '</span>' : "") + '</span>' +
               '<span class="maptip-value">' + esc(row.value) + '<span class="u">ms</span></span>' +
             '</div>'
           ).join("") + '</div>';

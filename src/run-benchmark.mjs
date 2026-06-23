@@ -35,9 +35,10 @@ async function main() {
     return;
   }
 
-  const startedAt = new Date();
   const rootDir = process.cwd();
-  const config = await loadConfig(args.config, rootDir);
+  const resume = args.resume ? await loadResumeRun(args.resume, rootDir) : null;
+  const startedAt = resume ? new Date(resume.raw.run?.startedAt || Date.now()) : new Date();
+  const config = resume ? resume.raw.run?.config : await loadConfig(args.config, rootDir);
   const benchmarkData = await loadBenchmarkData(rootDir);
   validateConfig(config, benchmarkData);
   const d1Locations = getConfiguredD1Locations(config, benchmarkData.d1Locations);
@@ -54,155 +55,214 @@ async function main() {
   });
 
   const auth = readAuthFromEnv();
-  const accountId = await resolveAccountId(auth, config.accountId);
-  const runId = toRunId(startedAt);
+  const accountId = resume?.raw.run?.accountId || await resolveAccountId(auth, config.accountId);
+  const runId = resume?.raw.run?.id || toRunId(startedAt);
   activeRunContext = { accountId, runId };
   installTerminationHandlers();
   const tempDir = path.resolve(rootDir, ".benchmark-tmp", runId);
-  const resultsDir = path.resolve(rootDir, config.resultsDir);
+  const resultsDir = resume ? resume.resultsDir : path.resolve(rootDir, config.resultsDir, runId);
   const deployedWorkers = [];
-  let databases = [];
-  let rawResult = undefined;
+  let activeDatabases = [];
+  let rawResult = resume?.raw;
 
   progress.log("D1 exact provider-region pinning is not exposed by Cloudflare.");
   progress.log("This benchmark tests Worker targeted placement against the observed D1 region.");
   progress.log(`Account: ${accountId}`);
-  progress.log(`Run: ${runId}`);
+  progress.log(`Run: ${runId}${resume ? " (resumed)" : ""}`);
 
   await mkdir(tempDir, { recursive: true });
   await mkdir(resultsDir, { recursive: true });
 
   try {
-    databases = await prepareDatabases({ auth, accountId, config, runId, d1Locations, progress });
-    for (const database of databases) {
-      progress.log(
-        `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "unknown"}, observed=${database.observedRegion ?? "unknown"}`
-      );
-    }
-
     const workerSourcePath = await copyWorkerSource(rootDir, tempDir);
 
-    rawResult = {
-      run: {
-        id: runId,
-        startedAt: startedAt.toISOString(),
-        completedAt: undefined,
-        config: redactConfig(config),
+    if (!rawResult) {
+      rawResult = createEmptyRawResult({
+        runId,
+        startedAt,
+        config,
         accountId,
         d1Locations,
         workerPlacementsByD1Location,
-        warnings: [
-          "D1 exact provider-region pinning is not exposed. Creation location is a hint unless a supported jurisdiction is used."
-        ]
-      },
-      databases: databases.map(serializeDatabase),
-      workerPlacements: candidatePlacements,
-      batches: [],
-      warmup: {},
-      measured: {}
-    };
+        candidatePlacements
+      });
+    } else {
+      prepareRawForResume(rawResult, progress);
+    }
 
-    for (let batchIndex = 0; batchIndex < placementBatches.length; batchIndex += 1) {
-      const placements = placementBatches[batchIndex];
-      const batchWorkers = [];
-      progress.log(`Starting Worker batch ${batchIndex + 1}/${placementBatches.length} (${placements.length} Workers)...`);
+    ensureRawDiscoveryState(rawResult, d1Locations);
+    const discoveredColosByLocation = createDiscoveredColosByLocation(rawResult, d1Locations);
+    const discoveryAttemptsByLocation = createDiscoveryAttemptsByLocation(rawResult, d1Locations);
+    const batchRecords = ensureBatchRecords(rawResult, placementBatches);
+    for (
+      let discoveryWaveIndex = nextDiscoveryWave(rawResult);
+      hasRemainingDiscoveryAttempts(discoveryAttemptsByLocation, config);
+      discoveryWaveIndex += 1
+    ) {
+      const waveLabel = `${discoveryWaveIndex + 1}`;
+      let databasesToBenchmark = [];
+      progress.log(`Starting D1 discovery wave ${waveLabel}...`);
 
       try {
-        const workers = await deployWorkers({
+        databasesToBenchmark = await discoverNewDatabases({
+          auth,
           accountId,
           config,
-          databases,
-          placements,
-          batchIndex,
           runId,
-          tempDir,
-          workerSourcePath,
-          deployedWorkers,
+          resultsDir,
+          rawResult,
+          d1Locations,
+          discoveryWaveIndex,
+          discoveredColosByLocation,
+          discoveryAttemptsByLocation,
+          activeDatabases,
           progress
         });
-        batchWorkers.push(...workers);
-        rawResult.batches.push({ index: batchIndex, placements, workers });
+        for (const database of databasesToBenchmark) {
+          rawResult.databaseColocations.push(serializeDatabaseColocation(database, {
+            discoveryWaveIndex,
+            attempt: database.discoveryAttempt,
+            coloKey: database.coloKey
+          }));
+        }
         await persistProgress(resultsDir, rawResult);
 
-        if (config.propagationSeconds > 0) {
-          progress.log(`Starting Worker propagation wait (${config.propagationSeconds}s)...`);
-          await sleep(config.propagationSeconds * 1000);
-          progress.recordPropagationWait();
-          progress.log(`Finished Worker propagation wait (${config.propagationSeconds}s).`);
+        if (databasesToBenchmark.length === 0) {
+          progress.log(`No new D1 colocations found in discovery wave ${waveLabel}; stopping discovery.`);
+          break;
         }
 
-        const measuredRequestsByRound = splitRequestsAcrossRounds(
-          config.benchmark.measuredRequests,
-          config.benchmark.splitInRounds
-        );
+        for (let batchIndex = 0; batchIndex < placementBatches.length; batchIndex += 1) {
+          const placements = placementBatches[batchIndex];
+          const batchRecord = batchRecords[batchIndex];
+          const batchWorkers = [];
+          progress.log(`Starting Worker batch ${batchIndex + 1}/${placementBatches.length} for D1 discovery wave ${waveLabel} (${placements.length} Workers)...`);
 
-        for (let roundIndex = 0; roundIndex < measuredRequestsByRound.length; roundIndex += 1) {
-          const measuredRequests = measuredRequestsByRound[roundIndex];
-          const roundLabel = `${roundIndex + 1}/${measuredRequestsByRound.length}`;
-          progress.log(
-            `Starting benchmark round ${roundLabel} (${measuredRequests} measured requests per pair)...`
-          );
+          try {
+            const workers = await deployWorkers({
+              accountId,
+              config,
+              databases: databasesToBenchmark,
+              placements,
+              batchIndex,
+              discoveryWaveIndex,
+              runId,
+              tempDir,
+              workerSourcePath,
+              deployedWorkers,
+              progress
+            });
+            batchWorkers.push(...workers);
+            batchRecord.rounds.push({
+              index: discoveryWaveIndex,
+              databases: databasesToBenchmark.map((database) => ({
+                key: database.key,
+                targetLocation: database.targetLocation,
+                observedRegion: database.observedRegion,
+                observedColo: database.observedColo,
+                coloKey: database.coloKey,
+                attempt: database.discoveryAttempt
+              })),
+              workers
+            });
+            await persistProgress(resultsDir, rawResult);
 
-          for (const database of databases) {
-            const placementsForDatabase = new Set(workerPlacementsByD1Location[database.targetLocation] || []);
-            ensureResultBucket(rawResult.warmup, database.key);
-            ensureResultBucket(rawResult.measured, database.key);
+            if (config.propagationSeconds > 0) {
+              progress.log(`Starting Worker propagation wait (${config.propagationSeconds}s)...`);
+              await sleep(config.propagationSeconds * 1000);
+              progress.recordPropagationWait();
+              progress.log(`Finished Worker propagation wait (${config.propagationSeconds}s).`);
+            }
 
-            for (const worker of workers) {
-              if (!placementsForDatabase.has(worker.placement)) continue;
+            const measuredRequestsByRound = splitRequestsAcrossRounds(
+              config.benchmark.measuredRequests,
+              config.benchmark.splitInRounds
+            );
 
-              if (!rawResult.warmup[database.key][worker.placement]) {
-                rawResult.warmup[database.key][worker.placement] = [];
+            for (let roundIndex = 0; roundIndex < measuredRequestsByRound.length; roundIndex += 1) {
+              const measuredRequests = measuredRequestsByRound[roundIndex];
+              const benchmarkRoundLabel = `${roundIndex + 1}/${measuredRequestsByRound.length}`;
+              progress.log(
+                `Starting benchmark round ${benchmarkRoundLabel} (${measuredRequests} measured requests per pair)...`
+              );
+
+              for (const database of databasesToBenchmark) {
+                const placementsForDatabase = new Set(workerPlacementsByD1Location[database.targetLocation] || []);
+                ensureColoResultBucket(rawResult.warmup, database.key, database.coloKey);
+                ensureColoResultBucket(rawResult.measured, database.key, database.coloKey);
+
+                for (const worker of workers) {
+                  if (!placementsForDatabase.has(worker.placement)) continue;
+
+                  if (!rawResult.warmup[database.key][database.coloKey][worker.placement]) {
+                    rawResult.warmup[database.key][database.coloKey][worker.placement] = [];
+                  }
+                  if (!rawResult.measured[database.key][database.coloKey][worker.placement]) {
+                    rawResult.measured[database.key][database.coloKey][worker.placement] = [];
+                  }
+
+                  const pairLabel = `D1 ${database.label}/${database.coloKey} x Worker ${worker.placement}`;
+                  progress.log(
+                    `Starting warmup: round ${benchmarkRoundLabel}, ${pairLabel} (${config.benchmark.warmupRequests} requests)...`
+                  );
+                  const warmupResults = await runRequests({
+                    worker,
+                    database,
+                    requests: config.benchmark.warmupRequests,
+                    queriesPerRequest: config.benchmark.queriesPerRequest,
+                    timeoutMs: config.benchmark.requestTimeoutMs,
+                    progress
+                  });
+                  rawResult.warmup[database.key][database.coloKey][worker.placement].push(...warmupResults);
+                  await persistProgress(resultsDir, rawResult);
+                  progress.log(
+                    `Finished warmup: round ${benchmarkRoundLabel}, ${pairLabel} (${warmupResults.length} requests).`
+                  );
+
+                  progress.log(
+                    `Starting measurement: round ${benchmarkRoundLabel}, ${pairLabel} (${measuredRequests} requests)...`
+                  );
+                  const measuredResults = await runRequests({
+                    worker,
+                    database,
+                    requests: measuredRequests,
+                    queriesPerRequest: config.benchmark.queriesPerRequest,
+                    timeoutMs: config.benchmark.requestTimeoutMs,
+                    progress
+                  });
+                  rawResult.measured[database.key][database.coloKey][worker.placement].push(...measuredResults);
+                  await persistProgress(resultsDir, rawResult);
+                  progress.log(
+                    `Finished measurement: round ${benchmarkRoundLabel}, ${pairLabel} (${rawResult.measured[database.key][database.coloKey][worker.placement].length}/${config.benchmark.measuredRequests} measured requests collected).`
+                  );
+                }
               }
-              if (!rawResult.measured[database.key][worker.placement]) {
-                rawResult.measured[database.key][worker.placement] = [];
-              }
 
-              const pairLabel = `D1 ${database.label} x Worker ${worker.placement}`;
-              progress.log(
-                `Starting warmup: round ${roundLabel}, ${pairLabel} (${config.benchmark.warmupRequests} requests)...`
-              );
-              const warmupResults = await runRequests({
-                worker,
-                database,
-                requests: config.benchmark.warmupRequests,
-                queriesPerRequest: config.benchmark.queriesPerRequest,
-                timeoutMs: config.benchmark.requestTimeoutMs,
-                progress
-              });
-              rawResult.warmup[database.key][worker.placement].push(...warmupResults);
-              await persistProgress(resultsDir, rawResult);
-              progress.log(
-                `Finished warmup: round ${roundLabel}, ${pairLabel} (${warmupResults.length} requests).`
-              );
+              progress.log(`Finished benchmark round ${benchmarkRoundLabel}.`);
+            }
 
-              progress.log(
-                `Starting measurement: round ${roundLabel}, ${pairLabel} (${measuredRequests} requests)...`
-              );
-              const measuredResults = await runRequests({
-                worker,
-                database,
-                requests: measuredRequests,
-                queriesPerRequest: config.benchmark.queriesPerRequest,
-                timeoutMs: config.benchmark.requestTimeoutMs,
-                progress
-              });
-              rawResult.measured[database.key][worker.placement].push(...measuredResults);
-              await persistProgress(resultsDir, rawResult);
-              progress.log(
-                `Finished measurement: round ${roundLabel}, ${pairLabel} (${rawResult.measured[database.key][worker.placement].length}/${config.benchmark.measuredRequests} measured requests collected).`
-              );
+            progress.log(`Finished Worker batch ${batchIndex + 1}/${placementBatches.length} for D1 discovery wave ${waveLabel}.`);
+          } finally {
+            if (config.cleanupWorkers) {
+              await cleanupWorkers(batchWorkers.map((worker) => worker.name), accountId, progress);
+              removeDeployedWorkers(deployedWorkers, batchWorkers.map((worker) => worker.name));
             }
           }
-
-          progress.log(`Finished benchmark round ${roundLabel}.`);
         }
+        markDiscoveryWaveCompleted(rawResult, discoveryWaveIndex);
+        await persistProgress(resultsDir, rawResult);
       } finally {
-        if (config.cleanupWorkers) {
-          await cleanupWorkers(batchWorkers.map((worker) => worker.name), accountId, progress);
-          removeDeployedWorkers(deployedWorkers, batchWorkers.map((worker) => worker.name));
+        for (const database of databasesToBenchmark) {
+          if (database.created && config.deleteD1DatabasesAfterRun !== false) {
+            await cleanupDatabase(database.name, accountId, progress);
+          } else if (database.created) {
+            progress.log(`Keeping disposable D1 database ${database.name}.`);
+          }
         }
+        removeActiveDatabases(activeDatabases, databasesToBenchmark);
       }
+
+      progress.log(`Finished D1 discovery wave ${waveLabel}.`);
     }
 
     rawResult.run.completedAt = new Date().toISOString();
@@ -218,7 +278,7 @@ async function main() {
       progress.log(`Keeping ${deployedWorkers.length} benchmark Workers because cleanupWorkers=false.`);
     }
 
-    for (const database of databases) {
+    for (const database of activeDatabases) {
       const shouldDeleteDatabase =
         database.created &&
         config.deleteD1DatabasesAfterRun !== false;
@@ -242,7 +302,11 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") args.help = true;
     else if (arg === "--config" || arg === "-c") args.config = requireValue(argv, ++i, arg);
+    else if (arg === "--resume") args.resume = requireValue(argv, ++i, arg);
     else throw new Error(`Unknown argument: ${arg}`);
+  }
+  if (args.resume && args.config) {
+    throw new Error("Use either --resume or --config, not both.");
   }
   return args;
 }
@@ -294,6 +358,7 @@ function printHelp() {
   console.log(`Usage:
   npm run benchmark
   npm run benchmark -- --config benchmark.config.partial.json
+  npm run benchmark -- --resume results/2026-06-22_10-14-03_UTC
 
 Default behavior:
   Loads benchmark.config.json, creates D1 databases from data/d1-locations.json, expands Worker
@@ -306,10 +371,11 @@ Environment:
 
 Options:
   -c, --config <path>        JSON config file. Defaults to benchmark.config.json.
+      --resume <folder>      Continue an incomplete run from a results folder.
       --help                 Show this help.
 
 Progress files:
-  results/raw.partial.json
+  results/<date-time>/raw.partial.json
 `);
 }
 
@@ -318,6 +384,96 @@ async function loadConfig(configPath, rootDir) {
   const absolutePath = path.resolve(rootDir, selectedConfigPath);
   const file = await readFile(absolutePath, "utf8");
   return JSON.parse(file);
+}
+
+async function loadResumeRun(resultsFolder, rootDir) {
+  const resultsDir = path.resolve(rootDir, resultsFolder);
+  for (const fileName of ["raw.partial.json", "raw.json"]) {
+    const fullPath = path.join(resultsDir, fileName);
+    try {
+      const raw = JSON.parse(await readFile(fullPath, "utf8"));
+      if (raw.run?.completedAt) {
+        throw new Error(`Run in ${resultsDir} is already complete.`);
+      }
+      if (!raw.run?.config) {
+        throw new Error(`Resume file ${fullPath} does not contain run.config.`);
+      }
+      return { resultsDir, raw };
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+  throw new Error(`Could not find raw.partial.json or raw.json in ${resultsDir}.`);
+}
+
+function createEmptyRawResult({ runId, startedAt, config, accountId, d1Locations, workerPlacementsByD1Location, candidatePlacements }) {
+  return {
+    run: {
+      id: runId,
+      startedAt: startedAt.toISOString(),
+      completedAt: undefined,
+      config: redactConfig(config),
+      accountId,
+      d1Locations,
+      workerPlacementsByD1Location,
+      warnings: [
+        "D1 exact provider-region pinning is not exposed. Creation location is a hint unless a supported jurisdiction is used."
+      ]
+    },
+    databases: d1Locations.map(serializeDatabaseTarget),
+    databaseColocations: [],
+    workerPlacements: candidatePlacements,
+    batches: [],
+    discovery: {
+      attemptsByLocation: {},
+      completedWaves: []
+    },
+    warmup: {},
+    measured: {}
+  };
+}
+
+function prepareRawForResume(raw, progress) {
+  raw.run.completedAt = undefined;
+  const incompleteWaves = incompleteDiscoveryWaves(raw);
+  if (incompleteWaves.length === 0) return;
+
+  progress.log(`Rolling back incomplete discovery waves before resume: ${incompleteWaves.map((index) => index + 1).join(", ")}.`);
+  const incomplete = new Set(incompleteWaves);
+  const colocationsToRemove = (raw.databaseColocations || [])
+    .filter((database) => incomplete.has(Number(database.discoveryWaveIndex)))
+    .map((database) => ({ dbKey: database.key, coloKey: database.coloKey }));
+
+  raw.databaseColocations = (raw.databaseColocations || [])
+    .filter((database) => !incomplete.has(Number(database.discoveryWaveIndex)));
+
+  for (const batch of raw.batches || []) {
+    batch.rounds = (batch.rounds || []).filter((round) => !incomplete.has(Number(round.index)));
+  }
+
+  removeColocationResults(raw.warmup, colocationsToRemove);
+  removeColocationResults(raw.measured, colocationsToRemove);
+}
+
+function incompleteDiscoveryWaves(raw) {
+  const completed = new Set((raw.discovery?.completedWaves || []).map(Number));
+  const waves = new Set();
+  for (const database of raw.databaseColocations || []) {
+    if (Number.isInteger(database.discoveryWaveIndex)) waves.add(database.discoveryWaveIndex);
+  }
+  for (const batch of raw.batches || []) {
+    for (const round of batch.rounds || []) {
+      if (Number.isInteger(round.index)) waves.add(round.index);
+    }
+  }
+  return [...waves].filter((index) => !completed.has(index)).sort((a, b) => a - b);
+}
+
+function removeColocationResults(results, colocations) {
+  for (const { dbKey, coloKey } of colocations) {
+    if (results?.[dbKey]) delete results[dbKey][coloKey];
+  }
 }
 
 async function loadBenchmarkData(rootDir) {
@@ -443,6 +599,9 @@ function validateConfig(config, benchmarkData) {
   if (!Number.isInteger(config.maxWorkersPerBatch) || config.maxWorkersPerBatch < 1) {
     throw new Error("maxWorkersPerBatch must be a positive integer.");
   }
+  if (!Number.isInteger(config.databaseDiscoveryAttemptsPerRegion) || config.databaseDiscoveryAttemptsPerRegion < 1) {
+    throw new Error("databaseDiscoveryAttemptsPerRegion must be a positive integer.");
+  }
   requirePlainObject(config.benchmark, "benchmark");
   for (const key of ["warmupRequests", "measuredRequests", "splitInRounds", "queriesPerRequest", "requestTimeoutMs"]) {
     if (!Number.isInteger(config.benchmark[key]) || config.benchmark[key] < 1) {
@@ -470,11 +629,11 @@ function validateConfig(config, benchmarkData) {
 function createBenchmarkProgress({ config, d1Locations, workerPlacementsByD1Location, candidatePlacements, placementBatches }) {
   const totalRequests = countPlannedBenchmarkRequests(config, d1Locations, workerPlacementsByD1Location);
   const totals = {
-    d1Creates: d1Locations.length,
-    workerCreates: candidatePlacements.length,
-    d1Deletes: config.deleteD1DatabasesAfterRun !== false ? d1Locations.length : 0,
-    workerDeletes: config.cleanupWorkers ? candidatePlacements.length : 0,
-    propagationWaits: config.propagationSeconds > 0 ? placementBatches.length : 0
+    d1Creates: d1Locations.length * config.databaseDiscoveryAttemptsPerRegion,
+    workerCreates: candidatePlacements.length * config.databaseDiscoveryAttemptsPerRegion,
+    d1Deletes: config.deleteD1DatabasesAfterRun !== false ? d1Locations.length * config.databaseDiscoveryAttemptsPerRegion : 0,
+    workerDeletes: config.cleanupWorkers ? candidatePlacements.length * config.databaseDiscoveryAttemptsPerRegion : 0,
+    propagationWaits: config.propagationSeconds > 0 ? placementBatches.length * config.databaseDiscoveryAttemptsPerRegion : 0
   };
   const stats = {
     request: createDurationAverage(),
@@ -545,7 +704,83 @@ function countPlannedBenchmarkRequests(config, d1Locations, workerPlacementsByD1
     (count, location) => count + unique(workerPlacementsByD1Location[location] || []).length,
     0
   );
-  return pairCount * requestsPerPair;
+  return pairCount * requestsPerPair * config.databaseDiscoveryAttemptsPerRegion;
+}
+
+function hasRemainingDiscoveryAttempts(discoveryAttemptsByLocation, config) {
+  return [...discoveryAttemptsByLocation.values()].some(
+    (attempts) => attempts < config.databaseDiscoveryAttemptsPerRegion
+  );
+}
+
+function ensureRawDiscoveryState(raw, d1Locations) {
+  if (!raw.discovery || typeof raw.discovery !== "object" || Array.isArray(raw.discovery)) {
+    raw.discovery = {};
+  }
+  if (!raw.discovery.attemptsByLocation || typeof raw.discovery.attemptsByLocation !== "object") {
+    raw.discovery.attemptsByLocation = {};
+  }
+  if (!Array.isArray(raw.discovery.completedWaves)) {
+    raw.discovery.completedWaves = [];
+  }
+  for (const location of d1Locations) {
+    if (!Number.isInteger(raw.discovery.attemptsByLocation[location])) {
+      raw.discovery.attemptsByLocation[location] = maxRecordedAttempt(raw, location);
+    }
+  }
+}
+
+function createDiscoveredColosByLocation(raw, d1Locations) {
+  const map = new Map(d1Locations.map((location) => [location, new Set()]));
+  for (const database of raw.databaseColocations || []) {
+    if (!map.has(database.targetLocation)) continue;
+    if (database.coloKey) map.get(database.targetLocation).add(database.coloKey);
+  }
+  return map;
+}
+
+function createDiscoveryAttemptsByLocation(raw, d1Locations) {
+  ensureRawDiscoveryState(raw, d1Locations);
+  return new Map(d1Locations.map((location) => [
+    location,
+    Number(raw.discovery.attemptsByLocation[location]) || 0
+  ]));
+}
+
+function maxRecordedAttempt(raw, location) {
+  return Math.max(
+    0,
+    ...(raw.databaseColocations || [])
+      .filter((database) => database.targetLocation === location)
+      .map((database) => Number(database.attempt) || 0)
+  );
+}
+
+function ensureBatchRecords(raw, placementBatches) {
+  if (!Array.isArray(raw.batches)) raw.batches = [];
+  return placementBatches.map((placements, index) => {
+    let batch = raw.batches.find((candidate) => candidate.index === index);
+    if (!batch) {
+      batch = { index, placements, rounds: [] };
+      raw.batches.push(batch);
+    }
+    batch.placements = placements;
+    if (!Array.isArray(batch.rounds)) batch.rounds = [];
+    return batch;
+  });
+}
+
+function nextDiscoveryWave(raw) {
+  const completed = raw.discovery?.completedWaves || [];
+  return completed.length ? Math.max(...completed.map(Number).filter(Number.isFinite)) + 1 : 0;
+}
+
+function markDiscoveryWaveCompleted(raw, discoveryWaveIndex) {
+  ensureRawDiscoveryState(raw, raw.databases?.map((database) => database.targetLocation || database.key) || []);
+  if (!raw.discovery.completedWaves.includes(discoveryWaveIndex)) {
+    raw.discovery.completedWaves.push(discoveryWaveIndex);
+    raw.discovery.completedWaves.sort((a, b) => a - b);
+  }
 }
 
 function createDurationAverage() {
@@ -711,46 +946,104 @@ async function resolveAccountId(auth, configuredAccountId) {
   throw new Error(`The credential can access multiple accounts. Set accountId or CLOUDFLARE_ACCOUNT_ID. Accounts: ${choices}`);
 }
 
-async function prepareDatabases({ auth, accountId, config, runId, d1Locations, progress }) {
-  const locations = d1Locations;
-  const namePrefix = config.d1DatabaseNamePrefix;
-  const databaseConfig = config.database || {};
+async function discoverNewDatabases({
+  auth,
+  accountId,
+  config,
+  runId,
+  resultsDir,
+  rawResult,
+  d1Locations,
+  discoveryWaveIndex,
+  discoveredColosByLocation,
+  discoveryAttemptsByLocation,
+  activeDatabases,
+  progress
+}) {
   const databases = [];
+  const maxAttempts = config.databaseDiscoveryAttemptsPerRegion;
 
-  progress.log(`Starting setup for ${locations.length} disposable D1 databases before Worker tests...`);
-  for (const location of locations) {
-    const name = `${namePrefix}-${location}-${Date.now()}`;
-    const started = performance.now();
-    progress.log(`Starting disposable D1 database setup: ${name} (${location})...`);
-    const createdDatabase = await createD1Database(
-      name,
-      { ...databaseConfig, location, jurisdiction: undefined },
-      accountId,
-      progress
-    );
-    await registerResource({
-      type: "d1",
-      accountId,
-      runId,
-      name,
-      id: createdDatabase.id,
-      metadata: { targetLocation: location }
-    });
-    const database = await prepareOneDatabase({
-      auth,
-      accountId,
-      databaseConfig: createdDatabase.id ? { id: createdDatabase.id, name } : { name },
-      created: true,
-      targetLocation: location,
-      label: location,
-      progress
-    });
-    progress.recordD1Create(performance.now() - started);
-    progress.log(`Finished disposable D1 database setup: ${name} (${database.id}).`);
-    databases.push(database);
+  for (const location of d1Locations) {
+    while ((discoveryAttemptsByLocation.get(location) || 0) < maxAttempts) {
+      const attempt = (discoveryAttemptsByLocation.get(location) || 0) + 1;
+      discoveryAttemptsByLocation.set(location, attempt);
+      rawResult.discovery.attemptsByLocation[location] = attempt;
+      await persistProgress(resultsDir, rawResult);
+
+      const database = await prepareDisposableDatabase({
+        auth,
+        accountId,
+        config,
+        runId,
+        location,
+        discoveryWaveIndex,
+        attempt,
+        progress
+      });
+      activeDatabases.push(database);
+
+      progress.log(
+        `D1 database: ${database.name} (${database.id}), target=${database.targetLocation ?? "unknown"}, observed=${database.observedRegion ?? "unknown"}, colo=${database.observedColo ?? "unknown"}, attempt=${attempt}/${maxAttempts}`
+      );
+
+      const discoveredColos = discoveredColosByLocation.get(location);
+      if (!discoveredColos.has(database.coloKey)) {
+        discoveredColos.add(database.coloKey);
+        databases.push(database);
+        break;
+      }
+
+      progress.log(`Discarding D1 ${location} colo ${database.coloKey}; already tested in this run.`);
+      if (database.created && config.deleteD1DatabasesAfterRun !== false) {
+        await cleanupDatabase(database.name, accountId, progress);
+      } else if (database.created) {
+        progress.log(`Keeping disposable D1 database ${database.name}.`);
+      }
+      removeActiveDatabases(activeDatabases, [database]);
+      await persistProgress(resultsDir, rawResult);
+    }
+
+    if ((discoveryAttemptsByLocation.get(location) || 0) >= maxAttempts && !databases.some((database) => database.targetLocation === location)) {
+      progress.log(`D1 ${location} discovery attempts exhausted (${maxAttempts}).`);
+    }
   }
 
   return databases;
+}
+
+async function prepareDisposableDatabase({ auth, accountId, config, runId, location, discoveryWaveIndex, attempt, progress }) {
+  const name = `${config.d1DatabaseNamePrefix}-w${discoveryWaveIndex + 1}-a${attempt}-${location}-${Date.now()}`;
+  const databaseConfig = config.database || {};
+  const started = performance.now();
+  progress.log(`Starting disposable D1 database setup: ${name} (${location})...`);
+  const createdDatabase = await createD1Database(
+    name,
+    { ...databaseConfig, location, jurisdiction: undefined },
+    accountId,
+    progress
+  );
+  await registerResource({
+    type: "d1",
+    accountId,
+    runId,
+    name,
+    id: createdDatabase.id,
+    metadata: { targetLocation: location, discoveryWaveIndex, attempt }
+  });
+  const database = await prepareOneDatabase({
+    auth,
+    accountId,
+    databaseConfig: createdDatabase.id ? { id: createdDatabase.id, name } : { name },
+    created: true,
+    targetLocation: location,
+    label: location,
+    progress
+  });
+  database.discoveryWaveIndex = discoveryWaveIndex;
+  database.discoveryAttempt = attempt;
+  progress.recordD1Create(performance.now() - started);
+  progress.log(`Finished disposable D1 database setup: ${name} (${database.id}).`);
+  return database;
 }
 
 async function prepareOneDatabase({ auth, accountId, databaseConfig, created, targetLocation, label, progress }) {
@@ -759,6 +1052,8 @@ async function prepareOneDatabase({ auth, accountId, databaseConfig, created, ta
   const observed = await observeD1Region(auth, accountId, database.id, progress);
   const info = await getDatabaseInfo(auth, accountId, database.id).catch(() => undefined);
   const observedRegion = observed?.servedByRegion ?? info?.running_in_region ?? info?.primary_location_hint;
+  const observedColo = observed?.servedByColo;
+  const coloKey = databaseColocationKey({ observedColo, observedRegion });
 
   return {
     key: makeDatabaseKey(label || database.name),
@@ -769,6 +1064,8 @@ async function prepareOneDatabase({ auth, accountId, databaseConfig, created, ta
     targetLocation,
     jurisdiction: database.jurisdiction ?? info?.jurisdiction,
     observedRegion,
+    observedColo,
+    coloKey,
     bindingName: makeBindingName(label || database.name),
     rawInfo: info,
     seedMeta: observed
@@ -887,11 +1184,11 @@ async function observeD1Region(auth, accountId, databaseId, progress) {
   }
 }
 
-async function deployWorkers({ accountId, config, databases, placements, batchIndex, runId, tempDir, workerSourcePath, deployedWorkers, progress }) {
+async function deployWorkers({ accountId, config, databases, placements, batchIndex, discoveryWaveIndex, runId, tempDir, workerSourcePath, deployedWorkers, progress }) {
   const workers = [];
 
   for (const placement of placements) {
-    const workerName = sanitizeWorkerName(`${config.workerNamePrefix}-b${batchIndex + 1}-${placement}`);
+    const workerName = sanitizeWorkerName(`${config.workerNamePrefix}-b${batchIndex + 1}-w${discoveryWaveIndex + 1}-${placement}`);
     const started = performance.now();
     progress.log(`Starting Worker deployment: ${workerName} (${placement})...`);
     const workerDir = path.join(tempDir, workerName);
@@ -940,7 +1237,7 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
       runId,
       name: workerName,
       url,
-      metadata: { placement, batchIndex }
+      metadata: { placement, batchIndex, discoveryWaveIndex }
     });
     workers.push({ name: workerName, placement, url, configPath });
     progress.recordWorkerCreate(performance.now() - started);
@@ -1026,6 +1323,9 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
       return {
         ok: false,
         status: response.status,
+        workerName: worker.name,
+        workerPlacement: worker.placement,
+        workerUrl: worker.url,
         clientMs,
         placementHeader,
         placementMode: placement.placementMode,
@@ -1038,6 +1338,9 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
     return {
       ok: true,
       status: response.status,
+      workerName: worker.name,
+      workerPlacement: worker.placement,
+      workerUrl: worker.url,
       clientMs,
       placementHeader,
       placementMode: placement.placementMode,
@@ -1048,6 +1351,9 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
     return {
       ok: false,
       status: 0,
+      workerName: worker.name,
+      workerPlacement: worker.placement,
+      workerUrl: worker.url,
       clientMs: performance.now() - started,
       error: error.name === "AbortError" ? "request_timeout" : error.message
     };
@@ -1058,21 +1364,25 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
 
 function buildSummary(raw, benchmarkData) {
   const databases = (raw.databases || [raw.database]).filter(Boolean);
+  const databaseByKey = Object.fromEntries(databases.map((database) => [database.key, database]));
   const byDatabase = {};
   const allRanked = [];
   const minSuccessfulRequests = getMinSuccessfulRequests(raw.run?.config);
 
   for (const database of databases) {
-    const measured = raw.measured?.[database.key] || {};
-    const placements = Object.entries(measured).map(([placement, requests]) =>
-      summarizePlacement({
-        raw,
-        database,
-        placement,
-        requests,
-        minSuccessfulRequests
-      })
-    );
+    const placements = [];
+    for (const [coloKey, byPlacement] of Object.entries(raw.measured?.[database.key] || {})) {
+      const colocatedDatabase = databaseForColocation(raw, databaseByKey, database.key, coloKey);
+      placements.push(...Object.entries(byPlacement || {}).map(([placement, requests]) =>
+        summarizePlacement({
+          raw,
+          database: colocatedDatabase,
+          placement,
+          requests,
+          minSuccessfulRequests
+        })
+      ));
+    }
     const ranked = placements
       .slice()
       .sort((a, b) => compareNullable(a[DEFAULT_AGGREGATE_FIELD], b[DEFAULT_AGGREGATE_FIELD]) || compareNullable(a.avgDbMs, b.avgDbMs))
@@ -1104,6 +1414,21 @@ function buildSummary(raw, benchmarkData) {
   };
 }
 
+function databaseForColocation(raw, databaseByKey, dbKey, coloKey) {
+  const target = databaseByKey[dbKey] || { key: dbKey, label: dbKey, targetLocation: dbKey };
+  const observed = (raw.databaseColocations || []).find((database) => database.key === dbKey && database.coloKey === coloKey);
+  return {
+    ...target,
+    ...observed,
+    key: dbKey,
+    label: target.label || observed?.label || dbKey,
+    targetLocation: target.targetLocation || observed?.targetLocation,
+    observedRegion: observed?.observedRegion || target.observedRegion,
+    observedColo: observed?.observedColo || target.observedColo,
+    coloKey
+  };
+}
+
 function summarizePlacement({ raw, database, placement, requests, minSuccessfulRequests }) {
   const successes = requests.filter((request) => request && request.ok);
   const errors = requests.filter((request) => !request?.ok);
@@ -1118,7 +1443,7 @@ function summarizePlacement({ raw, database, placement, requests, minSuccessfulR
   const placementColos = countValues(successes.map((request) => request.placementColo).filter(Boolean));
   const d1Regions = mergeCounts(successes.map((request) => request.body?.d1?.regions));
   const d1Colos = mergeCounts(successes.map((request) => request.body?.d1?.colos));
-  const worker = findWorker(raw, placement);
+  const worker = findWorker(raw, placement, requests);
 
   return {
     databaseKey: database.key,
@@ -1126,6 +1451,8 @@ function summarizePlacement({ raw, database, placement, requests, minSuccessfulR
     databaseName: database.name,
     d1TargetLocation: database.targetLocation,
     d1ObservedRegion: database.observedRegion,
+    d1ObservedColo: database.observedColo,
+    d1ColoKey: database.coloKey,
     placement,
     workerName: worker?.name,
     url: worker?.url,
@@ -1170,10 +1497,19 @@ function adjustedPerQueryMs(body) {
   });
 }
 
-function findWorker(raw, placement) {
+function findWorker(raw, placement, requests = []) {
+  const requestWorkerName = requests.find((request) => request?.workerName)?.workerName;
   for (const batch of raw.batches || []) {
-    const worker = batch.workers?.find((candidate) => candidate.placement === placement);
+    const worker = batch.workers?.find((candidate) =>
+      requestWorkerName ? candidate.name === requestWorkerName : candidate.placement === placement
+    );
     if (worker) return worker;
+    for (const round of batch.rounds || []) {
+      const roundWorker = round.workers?.find((candidate) =>
+        requestWorkerName ? candidate.name === requestWorkerName : candidate.placement === placement
+      );
+      if (roundWorker) return roundWorker;
+    }
   }
   return undefined;
 }
@@ -1186,7 +1522,20 @@ function ensureResultBucket(object, key) {
   if (!object[key]) object[key] = {};
 }
 
-function serializeDatabase(database) {
+function ensureColoResultBucket(object, key, coloKey) {
+  ensureResultBucket(object, key);
+  if (!object[key][coloKey]) object[key][coloKey] = {};
+}
+
+function serializeDatabaseTarget(location) {
+  return {
+    key: makeDatabaseKey(location),
+    label: location,
+    targetLocation: location
+  };
+}
+
+function serializeDatabaseColocation(database, { discoveryWaveIndex, attempt, coloKey }) {
   return {
     key: database.key,
     label: database.label,
@@ -1195,6 +1544,10 @@ function serializeDatabase(database) {
     createdByBenchmark: database.created,
     targetLocation: database.targetLocation,
     observedRegion: database.observedRegion,
+    observedColo: database.observedColo,
+    coloKey,
+    discoveryWaveIndex,
+    attempt,
     jurisdiction: database.jurisdiction,
     bindingName: database.bindingName,
     rawInfo: database.rawInfo
@@ -1217,6 +1570,18 @@ function makeDatabaseKey(value) {
   return sanitizeWorkerName(String(value)) || "database";
 }
 
+function databaseColocationKey(database) {
+  return normalizeD1Colo(database?.observedColo) || normalizeD1Region(database?.observedRegion) || "unknown";
+}
+
+function normalizeD1Colo(value) {
+  return value == null || value === "" ? null : String(value).trim().toUpperCase();
+}
+
+function normalizeD1Region(value) {
+  return value == null || value === "" ? null : String(value).trim().toUpperCase();
+}
+
 function makeBindingName(value) {
   return `DB_${String(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "DATABASE"}`;
 }
@@ -1225,6 +1590,13 @@ function removeDeployedWorkers(deployedWorkers, workerNames) {
   for (const workerName of workerNames) {
     const index = deployedWorkers.indexOf(workerName);
     if (index >= 0) deployedWorkers.splice(index, 1);
+  }
+}
+
+function removeActiveDatabases(activeDatabases, databases) {
+  const names = new Set(databases.map((database) => database.name));
+  for (let index = activeDatabases.length - 1; index >= 0; index -= 1) {
+    if (names.has(activeDatabases[index].name)) activeDatabases.splice(index, 1);
   }
 }
 
@@ -1522,7 +1894,8 @@ function sanitizeWorkerName(value) {
 }
 
 function toRunId(date) {
-  return date.toISOString().replace(/[:.]/g, "-");
+  const iso = date.toISOString();
+  return `${iso.slice(0, 10)}_${iso.slice(11, 19).replace(/:/g, "-")}_UTC`;
 }
 
 function redactConfig(config) {

@@ -52,6 +52,9 @@ function requestNotes({ request, body, database }) {
   if (!d1RegionMatchesTarget(body?.d1?.regions, database)) {
     notes.push("d1_region_mismatch");
   }
+  if (!d1ColoMatchesObserved(body?.d1?.colos, database)) {
+    notes.push("d1_colo_mismatch");
+  }
   return notes;
 }
 
@@ -63,6 +66,18 @@ function d1RegionMatchesTarget(regions, database) {
 }
 
 function normalizeD1Region(value) {
+  return value == null ? null : String(value).trim().toUpperCase();
+}
+
+function d1ColoMatchesObserved(colos, database) {
+  const target = normalizeD1Colo(database?.observedColo || database?.coloKey);
+  if (!target || target === "UNKNOWN") return true;
+  if (!colos || typeof colos !== "object") return false;
+  const observed = Object.entries(colos).filter(([, count]) => Number(count) > 0).map(([colo]) => normalizeD1Colo(colo));
+  return observed.length > 0 && observed.every((colo) => colo === target);
+}
+
+function normalizeD1Colo(value) {
   return value == null ? null : String(value).trim().toUpperCase();
 }
 

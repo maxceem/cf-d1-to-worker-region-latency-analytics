@@ -626,6 +626,26 @@ table.matrix th.rowhead { text-align: left; }
 .d1-colo, .placement-colo { color: var(--muted); font-weight: 500; }
 .map-name { position: absolute; top: 16px; left: max(20px, calc((100vw - 1180px) / 2 + 20px)); z-index: 2; font-size: 16px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text); text-shadow: 0 1px 8px rgba(0,0,0,.55); pointer-events: none; }
 .list-title { font-size: 16px; font-weight: 600; letter-spacing: .04em; color: var(--text); margin: 0 0 18px; }
+.d1loc-panel {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
+  margin: 0 0 20px;
+}
+.d1loc-label {
+  font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted);
+}
+.d1loc-tabs { display: flex; flex-wrap: wrap; gap: 7px; }
+.d1loc-tab {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  min-height: 30px; border: 1px solid var(--border); border-radius: 7px;
+  padding: 0 10px; background: var(--panel); color: var(--text);
+  font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.d1loc-tab:hover { border-color: var(--accent-2); }
+.d1loc-tab.active { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+.d1loc-best { color: var(--muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.d1loc-tab.active .d1loc-best { color: rgba(255,255,255,.78); }
+.route-d1 { color: #ffb066; }
 [data-theme="light"] .map-name { text-shadow: 0 1px 6px rgba(255,255,255,.85); }
 .mapwrap.full { margin-left: calc(50% - 50vw); margin-right: calc(50% - 50vw); border-radius: 0; margin-bottom: 34px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .regionmap { width: 100%; height: auto; display: block; }

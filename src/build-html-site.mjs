@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -134,20 +134,25 @@ Options:
 async function resolveInputPath(explicit) {
   if (explicit) return resolvePath(explicit);
   const candidates = [];
-  for (const relativePath of ["results/raw.json", "results-partial/raw.json"]) {
-    const full = resolvePath(relativePath);
-    try {
-      const info = await stat(full);
-      candidates.push({ full, mtimeMs: info.mtimeMs });
-    } catch {
-      // try next
+  const resultsDir = resolvePath("results");
+  try {
+    for (const entry of await readdir(resultsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const full = resolve(resultsDir, entry.name, "raw.json");
+      try {
+        const info = await stat(full);
+        candidates.push({ full, mtimeMs: info.mtimeMs });
+      } catch {
+        // try next
+      }
     }
+  } catch {
+    // Default to results/raw.json so the error message is sensible.
   }
   if (candidates.length > 0) {
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
     return candidates[0].full;
   }
-  // Default to results/raw.json so the error message is sensible.
   return resolvePath("results/raw.json");
 }
 
@@ -166,26 +171,21 @@ async function readJson(path) {
 function buildModel(raw) {
   const run = raw.run || {};
   const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
-  const databases = (raw.databases || []).map((db) => ({
-    key: db.key,
-    label: db.label || db.key,
-    name: db.name || null,
-    targetLocation: db.targetLocation || null,
-    observedRegion: db.observedRegion || null,
-    d1Colo: observedD1Colos(raw, db.key)[0] || null,
-    d1Colos: observedD1Colos(raw, db.key),
-  }));
+  const databases = buildDatabaseModels(raw);
   const placements = raw.workerPlacements || [];
 
   const measured = raw.measured || {};
   const pairs = [];
   for (const db of databases) {
-    const byPlacement = measured[db.key] || {};
-    for (const placement of placements) {
-      const requests = byPlacement[placement] || [];
-      pairs.push(summarizePair(db, placement, requests, {
-        minSuccessfulRequests
-      }));
+    const byColo = measured[db.key] || {};
+    for (const colocatedDb of db.colocations) {
+      const byPlacement = byColo[colocatedDb.coloKey] || {};
+      for (const placement of placements) {
+        const requests = byPlacement[placement] || [];
+        pairs.push(summarizePair(colocatedDb, placement, requests, {
+          minSuccessfulRequests
+        }));
+      }
     }
   }
 
@@ -209,30 +209,27 @@ function buildModel(raw) {
     databases,
     placements,
     pairs,
-    best: best ? { dbKey: best.dbKey, placement: best.placement } : null,
+    best: best ? { dbKey: best.dbKey, d1ColoKey: best.d1ColoKey, placement: best.placement } : null,
   };
 }
 
 function buildRawModel(raw) {
   const run = raw.run || {};
-  const databases = (raw.databases || []).map((db) => ({
-    key: db.key,
-    label: db.label || db.key,
-    targetLocation: db.targetLocation || null,
-    observedRegion: db.observedRegion || null,
-    d1Colo: observedD1Colos(raw, db.key)[0] || null,
-    d1Colos: observedD1Colos(raw, db.key),
-  }));
-  const databaseByKey = Object.fromEntries(databases.map((db) => [db.key, db]));
+  const databases = buildDatabaseModels(raw);
+  const databaseByColoKey = Object.fromEntries(databases.flatMap((db) =>
+    db.colocations.map((colocatedDb) => [`${db.key}|${colocatedDb.coloKey}`, colocatedDb])
+  ));
   const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
   const rows = [];
 
-  for (const [dbKey, byPlacement] of Object.entries(raw.measured || {})) {
-    const db = databaseByKey[dbKey];
-    if (!db) continue;
-    for (const [placement, requests] of Object.entries(byPlacement || {})) {
-      const measurements = getPairMeasurements({ requests, database: db });
-      rows.push(rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }));
+  for (const [dbKey, byColo] of Object.entries(raw.measured || {})) {
+    for (const [coloKey, byPlacement] of Object.entries(byColo || {})) {
+      const db = databaseByColoKey[`${dbKey}|${coloKey}`];
+      if (!db) continue;
+      for (const [placement, requests] of Object.entries(byPlacement || {})) {
+        const measurements = getPairMeasurements({ requests, database: db });
+        rows.push(rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }));
+      }
     }
   }
 
@@ -249,6 +246,42 @@ function buildRawModel(raw) {
     placements: raw.workerPlacements || [],
     rows,
   };
+}
+
+function buildDatabaseModels(raw) {
+  return (raw.databases || []).map((db) => {
+    const records = (raw.databaseColocations || []).filter((record) => record.key === db.key);
+    const coloKeys = uniqueValues([
+      ...records.map((record) => record.coloKey || record.observedColo),
+      ...Object.keys(raw.measured?.[db.key] || {})
+    ]);
+    const d1Colos = observedD1Colos(raw, db.key);
+    const colocations = coloKeys.map((coloKey) => {
+      const record = records.find((item) => (item.coloKey || item.observedColo) === coloKey) || {};
+      const observedColo = record.observedColo || (coloKey === "unknown" ? null : coloKey);
+      return {
+        key: db.key,
+        label: db.label || db.key,
+        name: record.name || null,
+        targetLocation: db.targetLocation || record.targetLocation || null,
+        observedRegion: record.observedRegion || db.observedRegion || null,
+        observedColo,
+        d1Colo: observedColo,
+        d1Colos: observedColo ? [observedColo] : [],
+        coloKey,
+      };
+    });
+    return {
+      key: db.key,
+      label: db.label || db.key,
+      name: db.name || null,
+      targetLocation: db.targetLocation || null,
+      observedRegion: db.observedRegion || records.find((record) => record.observedRegion)?.observedRegion || null,
+      d1Colo: d1Colos[0] || null,
+      d1Colos,
+      colocations,
+    };
+  });
 }
 
 function rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }) {
@@ -271,11 +304,13 @@ function rawExplorePairRow({ db, placement, requests, measurements, minSuccessfu
   const successCount = successful.length;
 
   return {
-    id: `${db.key}|${placement}`,
+    id: `${db.key}|${db.coloKey}|${placement}`,
     dbKey: db.key,
-    dbLabel: db.observedRegion || db.label,
+    dbLabel: db.d1Colo ? `${db.label} / ${db.d1Colo}` : db.label,
+    d1ColoKey: db.coloKey,
     d1TargetLocation: db.targetLocation,
     d1ObservedRegion: db.observedRegion,
+    d1ObservedColo: db.observedColo,
     placement,
     status: isPairReliable(successCount, minSuccessfulRequests) ? "ok" : "failed",
     note: noteValues.join(", ") || null,
@@ -367,6 +402,8 @@ function summarizePair(db, placement, requests, { minSuccessfulRequests }) {
     dbKey: db.key,
     dbLabel: db.label,
     dbObservedRegion: db.observedRegion,
+    d1ColoKey: db.coloKey,
+    d1Colo: db.d1Colo || db.observedColo || null,
     placement,
     requestCount: requests.length,
     httpSuccessCount: successful.length,
@@ -397,16 +434,23 @@ function summarizePair(db, placement, requests, { minSuccessfulRequests }) {
 
 function observedD1Colos(raw, dbKey) {
   const counts = {};
-  for (const requests of Object.values(raw.measured?.[dbKey] || {})) {
-    for (const request of requests || []) {
-      for (const [colo, count] of Object.entries(request?.body?.d1?.colos || {})) {
-        if (!colo) continue;
-        counts[colo] = (counts[colo] || 0) + (Number(count) || 0);
+  for (const [coloKey, byPlacement] of Object.entries(raw.measured?.[dbKey] || {})) {
+    if (coloKey && coloKey !== "unknown") counts[coloKey] = counts[coloKey] || 0;
+    for (const requests of Object.values(byPlacement || {})) {
+      for (const request of requests || []) {
+        for (const [colo, count] of Object.entries(request?.body?.d1?.colos || {})) {
+          if (!colo) continue;
+          counts[colo] = (counts[colo] || 0) + (Number(count) || 0);
+        }
       }
     }
   }
+  for (const record of raw.databaseColocations || []) {
+    if (record.key !== dbKey || !record.observedColo) continue;
+    counts[record.observedColo] = counts[record.observedColo] || 1;
+  }
   return Object.entries(counts)
-    .filter(([, count]) => count > 0)
+    .filter(([colo, count]) => colo && count >= 0)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([colo]) => colo);
 }
