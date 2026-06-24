@@ -24,6 +24,8 @@ const DEFAULT_CONFIG_PATH = "benchmark.config.json";
 const DEFAULT_AGGREGATE_FIELD = `${DEFAULT_AGGREGATE_METRIC}DbMs`;
 const WORKER_DEPLOY_RETRY_ATTEMPTS = 4;
 const WORKER_DEPLOY_RETRY_DELAY_MS = 5000;
+const WORKER_DEPLOY_VERIFY_ATTEMPTS = 8;
+const WORKER_DEPLOY_VERIFY_DELAY_MS = 3000;
 const WORKER_REQUEST_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WORKER_REQUEST_BUCKET_MS = 60 * 1000;
 const WORKER_REQUEST_BUDGET_FILE = "worker-request-budget.json";
@@ -144,6 +146,7 @@ async function main() {
 
           try {
             const workers = await deployWorkers({
+              auth,
               accountId,
               config,
               databases: databasesToBenchmark,
@@ -1298,7 +1301,7 @@ async function observeD1Region(auth, accountId, databaseId, progress) {
   }
 }
 
-async function deployWorkers({ accountId, config, databases, placements, batchIndex, discoveryWaveIndex, runId, tempDir, workerSourcePath, deployedWorkers, progress }) {
+async function deployWorkers({ auth, accountId, config, databases, placements, batchIndex, discoveryWaveIndex, runId, tempDir, workerSourcePath, deployedWorkers, progress }) {
   const workers = [];
 
   for (const placement of placements) {
@@ -1316,6 +1319,7 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
       main: path.relative(workerDir, workerSourcePath),
       compatibility_date: config.workerCompatibilityDate,
       compatibility_flags: config.workerCompatibilityFlags,
+      workers_dev: true,
       placement: {
         mode: "targeted",
         region: placement
@@ -1339,9 +1343,24 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
 
     await writeFile(configPath, `${JSON.stringify(wranglerConfig, null, 2)}\n`, "utf8");
 
-    const deployOutput = await deployWorkerWithRetry(workerName, placement, configPath, accountId, progress);
     deployedWorkers.push(workerName);
-    const url = extractWorkersDevUrl(deployOutput);
+    await registerResource({
+      type: "worker",
+      accountId,
+      runId,
+      name: workerName,
+      metadata: { placement, batchIndex, discoveryWaveIndex }
+    });
+
+    const deployResult = await deployWorkerWithRetry({
+      auth,
+      workerName,
+      placement,
+      configPath,
+      accountId,
+      progress
+    });
+    const url = deployResult.url || extractWorkersDevUrl(deployResult.output);
     if (!url) {
       throw new Error(`Could not find workers.dev URL in Wrangler deploy output for ${workerName}.`);
     }
@@ -1361,7 +1380,7 @@ async function deployWorkers({ accountId, config, databases, placements, batchIn
   return workers;
 }
 
-async function deployWorkerWithRetry(workerName, placement, configPath, accountId, progress) {
+async function deployWorkerWithRetry({ auth, workerName, placement, configPath, accountId, progress }) {
   for (let attempt = 1; attempt <= WORKER_DEPLOY_RETRY_ATTEMPTS; attempt += 1) {
     progress.log(`Starting Worker deploy attempt ${attempt}/${WORKER_DEPLOY_RETRY_ATTEMPTS}: ${workerName} (${placement})...`);
     try {
@@ -1369,8 +1388,24 @@ async function deployWorkerWithRetry(workerName, placement, configPath, accountI
         CLOUDFLARE_ACCOUNT_ID: accountId
       });
       progress.log(`Finished Worker deploy attempt ${attempt}/${WORKER_DEPLOY_RETRY_ATTEMPTS}: ${workerName} (${placement}).`);
-      return output;
+      return { output };
     } catch (error) {
+      if (isUploadedWorkerNotFoundDeployError(error, workerName)) {
+        const verified = await waitForUploadedWorkerDeployment({
+          auth,
+          accountId,
+          workerName,
+          progress
+        });
+        if (verified) {
+          progress.log(`Finished Worker deploy attempt ${attempt}/${WORKER_DEPLOY_RETRY_ATTEMPTS}: ${workerName} (${placement}) after API verification.`);
+          return {
+            output: `${error.stdout || ""}\n${error.stderr || ""}`.trim(),
+            url: verified.url
+          };
+        }
+      }
+
       if (attempt >= WORKER_DEPLOY_RETRY_ATTEMPTS || !isRetryableWorkerDeployError(error)) {
         throw error;
       }
@@ -1385,6 +1420,100 @@ async function deployWorkerWithRetry(workerName, placement, configPath, accountI
 function isRetryableWorkerDeployError(error) {
   const text = `${error?.message || ""}\n${error?.stdout || ""}\n${error?.stderr || ""}`;
   return /binding\s+\S+\s+of type d1 failed to generate/i.test(text) || /\bcode:\s*10021\b/i.test(text);
+}
+
+function isUploadedWorkerNotFoundDeployError(error, workerName) {
+  const text = `${error?.message || ""}\n${error?.stdout || ""}\n${error?.stderr || ""}`;
+  return (
+    text.includes(`Uploaded ${workerName}`) &&
+    (/\bcode:\s*10007\b/i.test(text) || /This Worker does not exist on your account/i.test(text))
+  );
+}
+
+async function waitForUploadedWorkerDeployment({ auth, accountId, workerName, progress }) {
+  let lastError;
+  const accountSubdomain = await getWorkersDevSubdomain(auth, accountId);
+
+  for (let attempt = 1; attempt <= WORKER_DEPLOY_VERIFY_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) await sleep(WORKER_DEPLOY_VERIFY_DELAY_MS);
+    progress.log(`Verifying uploaded Worker ${workerName} (${attempt}/${WORKER_DEPLOY_VERIFY_ATTEMPTS})...`);
+
+    try {
+      let scriptSubdomain = await getWorkerScriptSubdomain(auth, accountId, workerName);
+      if (!isWorkerScriptSubdomainEnabled(scriptSubdomain)) {
+        progress.log(`Enabling workers.dev route for uploaded Worker ${workerName}...`);
+        scriptSubdomain = await enableWorkerScriptSubdomain(auth, accountId, workerName);
+      }
+      if (!isWorkerScriptSubdomainEnabled(scriptSubdomain)) {
+        throw new Error(`workers.dev route is not enabled for ${workerName}.`);
+      }
+      return { url: buildWorkersDevUrl(workerName, accountSubdomain) };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  progress.warn(`Could not verify uploaded Worker ${workerName}: ${lastError?.message || "unknown error"}`);
+  return undefined;
+}
+
+async function getWorkerScriptSubdomain(auth, accountId, workerName) {
+  return cfRequest(auth, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`);
+}
+
+async function enableWorkerScriptSubdomain(auth, accountId, workerName) {
+  return cfRequest(auth, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`, {
+    method: "POST",
+    body: JSON.stringify({ enabled: true })
+  });
+}
+
+function isWorkerScriptSubdomainEnabled(response) {
+  return response?.result?.enabled === true;
+}
+
+async function getWorkersDevSubdomain(auth, accountId) {
+  const response = await cfRequest(auth, `/accounts/${accountId}/workers/subdomain`);
+  const subdomain = extractWorkersDevSubdomain(response);
+  if (!subdomain) {
+    throw new Error("Could not read account workers.dev subdomain from Cloudflare API response.");
+  }
+  return subdomain;
+}
+
+function extractWorkersDevSubdomain(response) {
+  const result = response?.result;
+  const candidates = [
+    result?.subdomain,
+    result?.name,
+    result?.value,
+    result?.workers_dev_subdomain,
+    result?.subdomain?.name,
+    result?.subdomain?.value
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
+    return normalizeWorkersDevSubdomain(candidate);
+  }
+
+  return undefined;
+}
+
+function normalizeWorkersDevSubdomain(value) {
+  try {
+    const parsed = new URL(value);
+    return normalizeWorkersDevSubdomain(parsed.hostname);
+  } catch {
+    return value
+      .replace(/^https?:\/\//, "")
+      .replace(/\/.*$/, "")
+      .replace(/\.workers\.dev$/i, "");
+  }
+}
+
+function buildWorkersDevUrl(workerName, accountSubdomain) {
+  return `https://${workerName}.${accountSubdomain}.workers.dev`;
 }
 
 async function copyWorkerSource(rootDir, tempDir) {
