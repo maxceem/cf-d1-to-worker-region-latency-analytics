@@ -18,6 +18,8 @@ CLOUDFLARE_API_TOKEN=... npm run benchmark
 
 The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/). Each discovery wave tries to find one new D1 colocation per D1 location, retrying already tested colocations until `databaseDiscoveryAttemptsPerRegion` is exhausted for that location. Newly observed D1 colocations are benchmarked against every Worker batch, then results are written under `results/<date-time>/raw.json`, the static report is built, and opened.
 
+`workerRequestsPer24Hours` limits benchmark Worker calls with a rolling 24-hour window. The default is `80000`; when the window is full, the script pauses until capacity becomes available. Resume uses the budget history saved in the selected results folder, while a new run starts with an empty budget.
+
 Resume an incomplete run by passing its results folder:
 
 ```bash

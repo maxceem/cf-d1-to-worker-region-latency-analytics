@@ -7,5 +7,6 @@ docs-finder/
 node_modules/
 .env
 .dev.vars
+benchmark.log
 npm-debug.log*
 .DS_Store

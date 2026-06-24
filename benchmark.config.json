@@ -8,6 +8,7 @@
   ],
   "workerObservabilityEnabled": true,
   "maxWorkersPerBatch": 50,
+  "workerRequestsPer24Hours": 80000,
   "databaseDiscoveryAttemptsPerRegion": 50,
   "benchmark": {
     "warmupRequests": 3,

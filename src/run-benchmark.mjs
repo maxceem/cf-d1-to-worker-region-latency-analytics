@@ -24,6 +24,9 @@ const DEFAULT_CONFIG_PATH = "benchmark.config.json";
 const DEFAULT_AGGREGATE_FIELD = `${DEFAULT_AGGREGATE_METRIC}DbMs`;
 const WORKER_DEPLOY_RETRY_ATTEMPTS = 4;
 const WORKER_DEPLOY_RETRY_DELAY_MS = 5000;
+const WORKER_REQUEST_WINDOW_MS = 24 * 60 * 60 * 1000;
+const WORKER_REQUEST_BUCKET_MS = 60 * 1000;
+const WORKER_REQUEST_BUDGET_FILE = "worker-request-budget.json";
 let cachedWranglerInvocation;
 let activeRunContext;
 let terminationCleanupStarted = false;
@@ -91,6 +94,7 @@ async function main() {
     }
 
     ensureRawDiscoveryState(rawResult, d1Locations);
+    const workerRequestLimiter = createWorkerRequestLimiter({ config, rawResult, resultsDir, progress });
     const discoveredColosByLocation = createDiscoveredColosByLocation(rawResult, d1Locations);
     const discoveryAttemptsByLocation = createDiscoveryAttemptsByLocation(rawResult, d1Locations);
     const batchRecords = ensureBatchRecords(rawResult, placementBatches);
@@ -211,7 +215,8 @@ async function main() {
                     requests: config.benchmark.warmupRequests,
                     queriesPerRequest: config.benchmark.queriesPerRequest,
                     timeoutMs: config.benchmark.requestTimeoutMs,
-                    progress
+                    progress,
+                    requestLimiter: workerRequestLimiter
                   });
                   rawResult.warmup[database.key][database.coloKey][worker.placement].push(...warmupResults);
                   await persistProgress(resultsDir, rawResult);
@@ -228,7 +233,8 @@ async function main() {
                     requests: measuredRequests,
                     queriesPerRequest: config.benchmark.queriesPerRequest,
                     timeoutMs: config.benchmark.requestTimeoutMs,
-                    progress
+                    progress,
+                    requestLimiter: workerRequestLimiter
                   });
                   rawResult.measured[database.key][database.coloKey][worker.placement].push(...measuredResults);
                   await persistProgress(resultsDir, rawResult);
@@ -392,6 +398,7 @@ async function loadResumeRun(resultsFolder, rootDir) {
     const fullPath = path.join(resultsDir, fileName);
     try {
       const raw = JSON.parse(await readFile(fullPath, "utf8"));
+      raw.workerRequestBudget = await loadWorkerRequestBudget(resultsDir, raw.workerRequestBudget);
       if (raw.run?.completedAt) {
         throw new Error(`Run in ${resultsDir} is already complete.`);
       }
@@ -405,6 +412,15 @@ async function loadResumeRun(resultsFolder, rootDir) {
     }
   }
   throw new Error(`Could not find raw.partial.json or raw.json in ${resultsDir}.`);
+}
+
+async function loadWorkerRequestBudget(resultsDir, fallbackBudget) {
+  try {
+    return JSON.parse(await readFile(path.join(resultsDir, WORKER_REQUEST_BUDGET_FILE), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return fallbackBudget;
+    throw error;
+  }
 }
 
 function createEmptyRawResult({ runId, startedAt, config, accountId, d1Locations, workerPlacementsByD1Location, candidatePlacements }) {
@@ -428,6 +444,12 @@ function createEmptyRawResult({ runId, startedAt, config, accountId, d1Locations
     discovery: {
       attemptsByLocation: {},
       completedWaves: []
+    },
+    workerRequestBudget: {
+      limit: config.workerRequestsPer24Hours,
+      windowMs: WORKER_REQUEST_WINDOW_MS,
+      bucketMs: WORKER_REQUEST_BUCKET_MS,
+      buckets: []
     },
     warmup: {},
     measured: {}
@@ -598,6 +620,9 @@ function validateConfig(config, benchmarkData) {
   requireBoolean(config.workerObservabilityEnabled, "workerObservabilityEnabled");
   if (!Number.isInteger(config.maxWorkersPerBatch) || config.maxWorkersPerBatch < 1) {
     throw new Error("maxWorkersPerBatch must be a positive integer.");
+  }
+  if (!Number.isInteger(config.workerRequestsPer24Hours) || config.workerRequestsPer24Hours < 1) {
+    throw new Error("workerRequestsPer24Hours must be a positive integer.");
   }
   if (!Number.isInteger(config.databaseDiscoveryAttemptsPerRegion) || config.databaseDiscoveryAttemptsPerRegion < 1) {
     throw new Error("databaseDiscoveryAttemptsPerRegion must be a positive integer.");
@@ -781,6 +806,95 @@ function markDiscoveryWaveCompleted(raw, discoveryWaveIndex) {
     raw.discovery.completedWaves.push(discoveryWaveIndex);
     raw.discovery.completedWaves.sort((a, b) => a - b);
   }
+}
+
+function createWorkerRequestLimiter({ config, rawResult, resultsDir, progress }) {
+  const limit = config.workerRequestsPer24Hours;
+  const windowMs = WORKER_REQUEST_WINDOW_MS;
+  const bucketMs = WORKER_REQUEST_BUCKET_MS;
+  ensureWorkerRequestBudget(rawResult, { limit, windowMs, bucketMs });
+
+  return {
+    async waitForSlot() {
+      while (true) {
+        const now = Date.now();
+        const budget = ensureWorkerRequestBudget(rawResult, { limit, windowMs, bucketMs });
+        pruneWorkerRequestBuckets(budget, now);
+        const used = countWorkerRequestBuckets(budget);
+
+        if (used < limit) return;
+
+        const waitMs = nextWorkerRequestWaitMs(budget, now);
+        const resumeAt = new Date(now + waitMs).toISOString();
+        progress.log(`Worker request budget reached (${used}/${limit} in rolling 24h); pausing until ${resumeAt}.`);
+        await persistWorkerRequestBudget(resultsDir, budget);
+        await persistProgress(resultsDir, rawResult);
+        await sleep(waitMs);
+      }
+    },
+    async recordRequest() {
+      const now = Date.now();
+      const budget = ensureWorkerRequestBudget(rawResult, { limit, windowMs, bucketMs });
+      pruneWorkerRequestBuckets(budget, now);
+      const bucketStartMs = Math.floor(now / bucketMs) * bucketMs;
+      const bucket = budget.buckets.find((entry) => entry.startMs === bucketStartMs);
+
+      if (bucket) {
+        bucket.count += 1;
+      } else {
+        budget.buckets.push({ startMs: bucketStartMs, count: 1 });
+        budget.buckets.sort((a, b) => a.startMs - b.startMs);
+      }
+      await persistWorkerRequestBudget(resultsDir, budget);
+    }
+  };
+}
+
+function ensureWorkerRequestBudget(raw, { limit, windowMs, bucketMs }) {
+  if (!raw.workerRequestBudget || typeof raw.workerRequestBudget !== "object" || Array.isArray(raw.workerRequestBudget)) {
+    raw.workerRequestBudget = {};
+  }
+
+  const budget = raw.workerRequestBudget;
+  budget.limit = limit;
+  budget.windowMs = windowMs;
+  budget.bucketMs = bucketMs;
+  if (!Array.isArray(budget.buckets)) budget.buckets = [];
+  budget.buckets = budget.buckets
+    .map((bucket) => ({
+      startMs: Number(bucket.startMs),
+      count: Number(bucket.count)
+    }))
+    .filter((bucket) => (
+      Number.isFinite(bucket.startMs) &&
+      Number.isFinite(bucket.count) &&
+      bucket.count > 0
+    ));
+
+  return budget;
+}
+
+function pruneWorkerRequestBuckets(budget, now) {
+  const cutoff = now - budget.windowMs;
+  budget.buckets = budget.buckets.filter((bucket) => bucket.startMs >= cutoff);
+}
+
+function countWorkerRequestBuckets(budget) {
+  return budget.buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+}
+
+function nextWorkerRequestWaitMs(budget, now) {
+  const oldestBucketStartMs = budget.buckets.reduce(
+    (oldest, bucket) => Math.min(oldest, bucket.startMs),
+    Infinity
+  );
+
+  if (!Number.isFinite(oldestBucketStartMs)) return 1000;
+  return Math.max(1000, oldestBucketStartMs + budget.windowMs - now + 1000);
+}
+
+async function persistWorkerRequestBudget(resultsDir, budget) {
+  await writeFile(path.join(resultsDir, WORKER_REQUEST_BUDGET_FILE), `${JSON.stringify(budget, null, 2)}\n`, "utf8");
 }
 
 function createDurationAverage() {
@@ -1281,9 +1395,11 @@ async function copyWorkerSource(rootDir, tempDir) {
   return targetPath;
 }
 
-async function runRequests({ worker, database, requests, queriesPerRequest, timeoutMs, progress }) {
+async function runRequests({ worker, database, requests, queriesPerRequest, timeoutMs, progress, requestLimiter }) {
   const results = [];
   for (let requestIndex = 0; requestIndex < requests; requestIndex += 1) {
+    await requestLimiter.waitForSlot();
+    await requestLimiter.recordRequest();
     const started = performance.now();
     results[requestIndex] = await callBench(worker, database, queriesPerRequest, timeoutMs);
     progress.recordRequest(performance.now() - started);
