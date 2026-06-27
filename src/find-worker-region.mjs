@@ -448,7 +448,7 @@ async function deployWorkerWithRetry(workerName, placement, configPath, accountI
       });
     } catch (error) {
       if (attempt >= retry.attempts || !isRetryableWorkerDeployError(error)) throw error;
-      log(`Deploy failed while Cloudflare prepared bindings; retrying ${workerName} (${placement}).`);
+      log(`Deploy failed with a retryable Cloudflare API error; retrying ${workerName} (${placement}).`);
       await sleep(retry.delayMs);
     }
   }
@@ -456,7 +456,15 @@ async function deployWorkerWithRetry(workerName, placement, configPath, accountI
 
 function isRetryableWorkerDeployError(error) {
   const text = `${error?.message || ""}\n${error?.stdout || ""}\n${error?.stderr || ""}`;
-  return /binding\s+\S+\s+of type d1 failed to generate/i.test(text) || /\bcode:\s*10021\b/i.test(text);
+  return (
+    /binding\s+\S+\s+of type d1 failed to generate/i.test(text) ||
+    /\bcode:\s*10021\b/i.test(text) ||
+    isRetryableWorkerSubdomainApiError(text)
+  );
+}
+
+function isRetryableWorkerSubdomainApiError(text) {
+  return /\bcode:\s*10013\b/i.test(text) && /\/workers\/scripts\/[^)\s]+\/subdomain\b/i.test(text);
 }
 
 async function runRequests({ worker, requests, queriesPerRequest, timeoutMs }) {
