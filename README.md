@@ -26,6 +26,14 @@ Resume an incomplete run by passing its results folder:
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --resume results/2026-06-22_10-14-03_UTC
 ```
 
+Retry failed target pairs from a completed run by passing its results folder:
+
+```bash
+CLOUDFLARE_API_TOKEN=... npm run benchmark -- --retry-failed results/2026-06-24_11-55-26_UTC
+```
+
+The retry uses the saved run config, creates disposable D1 databases only for needed target locations, and spends up to `databaseDiscoveryAttemptsPerRegion` creation attempts per target location to find colocations that still have failed pairs.
+
 The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 
 - `D1:Edit`

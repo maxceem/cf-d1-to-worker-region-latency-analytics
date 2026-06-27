@@ -43,13 +43,16 @@ async function main() {
 
   const rootDir = process.cwd();
   const resume = args.resume ? await loadResumeRun(args.resume, rootDir) : null;
-  const startedAt = resume ? new Date(resume.raw.run?.startedAt || Date.now()) : new Date();
-  const config = resume ? resume.raw.run?.config : await loadConfig(args.config, rootDir);
+  const retryFailed = args.retryFailed ? await loadRetryFailedRun(args.retryFailed, rootDir) : null;
+  const loadedRun = resume || retryFailed;
+  const startedAt = loadedRun ? new Date(loadedRun.raw.run?.startedAt || Date.now()) : new Date();
+  const config = loadedRun ? loadedRun.raw.run?.config : await loadConfig(args.config, rootDir);
   const benchmarkData = await loadBenchmarkData(rootDir);
   validateConfig(config, benchmarkData);
-  const d1Locations = getConfiguredD1Locations(config, benchmarkData.d1Locations);
-  const workerPlacementsByD1Location = resolveWorkerPlacementMatrix(config, d1Locations, benchmarkData.workerPlacements);
-  const candidatePlacements = unique(Object.values(workerPlacementsByD1Location).flat());
+  const d1Locations = loadedRun?.raw.run?.d1Locations || getConfiguredD1Locations(config, benchmarkData.d1Locations);
+  const workerPlacementsByD1Location = loadedRun?.raw.run?.workerPlacementsByD1Location ||
+    resolveWorkerPlacementMatrix(config, d1Locations, benchmarkData.workerPlacements);
+  const candidatePlacements = loadedRun?.raw.workerPlacements || unique(Object.values(workerPlacementsByD1Location).flat());
   validateWorkerPlacementMatrix(workerPlacementsByD1Location);
   const placementBatches = chunk(candidatePlacements, config.maxWorkersPerBatch);
   const progress = createBenchmarkProgress({
@@ -61,20 +64,20 @@ async function main() {
   });
 
   const auth = readAuthFromEnv();
-  const accountId = resume?.raw.run?.accountId || await resolveAccountId(auth, config.accountId);
-  const runId = resume?.raw.run?.id || toRunId(startedAt);
+  const accountId = loadedRun?.raw.run?.accountId || await resolveAccountId(auth, config.accountId);
+  const runId = loadedRun?.raw.run?.id || toRunId(startedAt);
   const tempDir = path.resolve(rootDir, ".benchmark-tmp", runId);
-  const resultsDir = resume ? resume.resultsDir : path.resolve(rootDir, config.resultsDir, runId);
-  activeRunContext = { accountId, runId, rootDir, resultsDir };
+  const resultsDir = loadedRun ? loadedRun.resultsDir : path.resolve(rootDir, config.resultsDir, runId);
+  activeRunContext = { accountId, runId, rootDir, resultsDir, retryFailed: Boolean(retryFailed) };
   installTerminationHandlers();
   const deployedWorkers = [];
   let activeDatabases = [];
-  let rawResult = resume?.raw;
+  let rawResult = loadedRun?.raw;
 
   progress.log("D1 exact provider-region pinning is not exposed by Cloudflare.");
   progress.log("This benchmark tests Worker targeted placement against the observed D1 region.");
   progress.log(`Account: ${accountId}`);
-  progress.log(`Run: ${runId}${resume ? " (resumed)" : ""}`);
+  progress.log(`Run: ${runId}${resume ? " (resumed)" : ""}${retryFailed ? " (retry failed pairs)" : ""}`);
 
   await mkdir(tempDir, { recursive: true });
   await mkdir(resultsDir, { recursive: true });
@@ -93,7 +96,11 @@ async function main() {
         candidatePlacements
       });
     } else {
-      prepareRawForResume(rawResult, progress);
+      if (retryFailed) {
+        prepareRawForRetryFailed(rawResult);
+      } else {
+        prepareRawForResume(rawResult, progress);
+      }
     }
 
     ensureRawDiscoveryState(rawResult, d1Locations);
@@ -101,6 +108,33 @@ async function main() {
     const discoveredColosByLocation = createDiscoveredColosByLocation(rawResult, d1Locations);
     const discoveryAttemptsByLocation = createDiscoveryAttemptsByLocation(rawResult, d1Locations);
     const batchRecords = ensureBatchRecords(rawResult, placementBatches);
+
+    if (retryFailed) {
+      await retryFailedPairs({
+        auth,
+        accountId,
+        config,
+        runId,
+        tempDir,
+        resultsDir,
+        rawResult,
+        workerPlacementsByD1Location,
+        placementBatches,
+        batchRecords,
+        workerSourcePath,
+        workerRequestLimiter,
+        activeDatabases,
+        deployedWorkers,
+        progress
+      });
+      rawResult.run.completedAt = new Date().toISOString();
+      await writeOutputs(resultsDir, rawResult);
+      await buildAndOpenSite({ config, resultsDir, rootDir, progress });
+      const summary = buildSummary(rawResult, benchmarkData);
+      printSummary(summary, resultsDir);
+      return;
+    }
+
     for (
       let discoveryWaveIndex = nextDiscoveryWave(rawResult);
       hasRemainingDiscoveryAttempts(discoveryAttemptsByLocation, config);
@@ -229,7 +263,7 @@ async function main() {
 
                   const measuredRequestsForPair = rawResult.measured[database.key][database.coloKey][worker.placement];
                   const requestsToMeasure = database.repairExistingColocation
-                    ? repairRequestCount(measuredRequestsForPair, config.benchmark.measuredRequests)
+                    ? repairRequestCount(measuredRequestsForPair, config.benchmark.measuredRequests, database)
                     : measuredRequests;
                   if (requestsToMeasure === 0) continue;
 
@@ -268,7 +302,8 @@ async function main() {
                     const repair = repairMeasuredRequests({
                       existing: measuredRequestsForPair,
                       replacements: measuredResults,
-                      measuredRequests: config.benchmark.measuredRequests
+                      measuredRequests: config.benchmark.measuredRequests,
+                      database
                     });
                     progress.log(
                       `Finished repair: round ${benchmarkRoundLabel}, ${pairLabel} (${repair.replaced}/${repair.attempted} failed measured requests replaced).`
@@ -352,10 +387,12 @@ function parseArgs(argv) {
     if (arg === "--help" || arg === "-h") args.help = true;
     else if (arg === "--config" || arg === "-c") args.config = requireValue(argv, ++i, arg);
     else if (arg === "--resume") args.resume = requireValue(argv, ++i, arg);
+    else if (arg === "--retry-failed") args.retryFailed = requireValue(argv, ++i, arg);
     else throw new Error(`Unknown argument: ${arg}`);
   }
-  if (args.resume && args.config) {
-    throw new Error("Use either --resume or --config, not both.");
+  const selectedModes = [args.config, args.resume, args.retryFailed].filter(Boolean);
+  if (selectedModes.length > 1) {
+    throw new Error("Use only one of --config, --resume, or --retry-failed.");
   }
   return args;
 }
@@ -409,6 +446,7 @@ function printHelp() {
   npm run benchmark
   npm run benchmark -- --config benchmark.config.partial.json
   npm run benchmark -- --resume results/2026-06-22_10-14-03_UTC
+  npm run benchmark -- --retry-failed results/2026-06-24_11-55-26_UTC
 
 Default behavior:
   Loads benchmark.config.json, creates D1 databases from data/d1-locations.json, expands Worker
@@ -422,6 +460,8 @@ Environment:
 Options:
   -c, --config <path>        JSON config file. Defaults to benchmark.config.json.
       --resume <folder>      Continue an incomplete run from a results folder.
+      --retry-failed <folder>
+                             Re-run failed target pairs from a completed results folder.
       --help                 Show this help.
 
 Progress files:
@@ -448,6 +488,28 @@ async function loadResumeRun(resultsFolder, rootDir) {
       }
       if (!raw.run?.config) {
         throw new Error(`Resume file ${fullPath} does not contain run.config.`);
+      }
+      return { resultsDir, raw };
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+  throw new Error(`Could not find raw.partial.json or raw.json in ${resultsDir}.`);
+}
+
+async function loadRetryFailedRun(resultsFolder, rootDir) {
+  const resultsDir = path.resolve(rootDir, resultsFolder);
+  for (const fileName of ["raw.json", "raw.partial.json"]) {
+    const fullPath = path.join(resultsDir, fileName);
+    try {
+      const raw = JSON.parse(await readFile(fullPath, "utf8"));
+      raw.workerRequestBudget = await loadWorkerRequestBudget(resultsDir, raw.workerRequestBudget);
+      if (!raw.run?.config) {
+        throw new Error(`Retry file ${fullPath} does not contain run.config.`);
+      }
+      if (fileName === "raw.json" && !raw.run?.completedAt) {
+        throw new Error(`Run in ${resultsDir} is incomplete. Use --resume for incomplete runs.`);
       }
       return { resultsDir, raw };
     } catch (error) {
@@ -520,6 +582,10 @@ function prepareRawForResume(raw, progress) {
 
   removeColocationResults(raw.warmup, colocationsToRemove);
   removeColocationResults(raw.measured, colocationsToRemove);
+}
+
+function prepareRawForRetryFailed(raw) {
+  raw.run.completedAt = undefined;
 }
 
 function incompleteDiscoveryWaves(raw) {
@@ -1156,7 +1222,7 @@ async function discoverNewDatabases({
         rawResult,
         database,
         workerPlacementsByD1Location,
-        minSuccessfulRequests: config.benchmark.minSuccessfulRequests
+        measuredRequests: config.benchmark.measuredRequests
       });
       if (repairPlacements.length > 0) {
         database.repairExistingColocation = true;
@@ -1182,6 +1248,355 @@ async function discoverNewDatabases({
   }
 
   return databases;
+}
+
+async function retryFailedPairs({
+  auth,
+  accountId,
+  config,
+  runId,
+  tempDir,
+  resultsDir,
+  rawResult,
+  workerPlacementsByD1Location,
+  placementBatches,
+  batchRecords,
+  workerSourcePath,
+  workerRequestLimiter,
+  activeDatabases,
+  deployedWorkers,
+  progress
+}) {
+  const repairGroupsByLocation = createFailedPairRepairGroups({
+    rawResult,
+    workerPlacementsByD1Location,
+    measuredRequests: config.benchmark.measuredRequests,
+    minSuccessfulRequests: config.benchmark.minSuccessfulRequests
+  });
+  const totalPairs = countRepairGroups(repairGroupsByLocation);
+  if (totalPairs === 0) {
+    progress.log("No failed target pairs need retry.");
+    return;
+  }
+
+  progress.log(`Retrying ${totalPairs} failed target pairs across ${repairGroupsByLocation.size} D1 target locations.`);
+  let discoveryWaveIndex = nextDiscoveryWave(rawResult);
+
+  for (const [location, groupsByColo] of repairGroupsByLocation) {
+    const maxAttempts = config.databaseDiscoveryAttemptsPerRegion;
+    progress.log(`Starting failed-pair D1 discovery for ${location} (${pendingRepairPairCount(groupsByColo, rawResult, config)} pairs)...`);
+
+    for (
+      let attempt = 1;
+      attempt <= maxAttempts && hasPendingRepairGroups(groupsByColo, rawResult, config);
+      attempt += 1
+    ) {
+      const currentWaveIndex = discoveryWaveIndex;
+      discoveryWaveIndex += 1;
+      let database;
+
+      try {
+        database = await prepareDisposableDatabase({
+          auth,
+          accountId,
+          config,
+          runId,
+          location,
+          discoveryWaveIndex: currentWaveIndex,
+          attempt,
+          progress
+        });
+        activeDatabases.push(database);
+
+        progress.log(
+          `D1 retry database: ${database.name} (${database.id}), target=${database.targetLocation ?? "unknown"}, observed=${database.observedRegion ?? "unknown"}, colo=${database.observedColo ?? "unknown"}, attempt=${attempt}/${maxAttempts}`
+        );
+
+        const repairGroup = groupsByColo.get(database.coloKey);
+        if (!repairGroup) {
+          progress.log(`Discarding D1 ${location} colo ${database.coloKey}; no failed pairs need this colocation.`);
+          continue;
+        }
+
+        const repairPlacements = pendingRepairPlacements({
+          rawResult,
+          database,
+          placements: repairGroup.placements,
+          measuredRequests: config.benchmark.measuredRequests,
+          minSuccessfulRequests: config.benchmark.minSuccessfulRequests
+        });
+        if (repairPlacements.length === 0) {
+          progress.log(`Skipping D1 ${location} colo ${database.coloKey}; failed pairs were already repaired.`);
+          continue;
+        }
+
+        database.repairExistingColocation = true;
+        database.repairPlacements = repairPlacements;
+        progress.log(`Repairing D1 ${location} colo ${database.coloKey}; ${repairPlacements.length} Worker placements need samples.`);
+
+        await benchmarkDatabases({
+          auth,
+          accountId,
+          config,
+          databasesToBenchmark: [database],
+          workerPlacementsByD1Location,
+          placementBatches,
+          batchRecords,
+          discoveryWaveIndex: currentWaveIndex,
+          runId,
+          tempDir,
+          workerSourcePath,
+          deployedWorkers,
+          workerRequestLimiter,
+          resultsDir,
+          rawResult,
+          progress
+        });
+        markDiscoveryWaveCompleted(rawResult, currentWaveIndex);
+        await persistProgress(resultsDir, rawResult);
+      } finally {
+        if (database?.created && config.deleteD1DatabasesAfterRun !== false) {
+          await cleanupDatabase(database.name, accountId, progress);
+        } else if (database?.created) {
+          progress.log(`Keeping disposable D1 database ${database.name}.`);
+        }
+        if (database) removeActiveDatabases(activeDatabases, [database]);
+      }
+    }
+
+    const remainingPairs = pendingRepairPairCount(groupsByColo, rawResult, config);
+    if (remainingPairs > 0) {
+      progress.log(`D1 ${location} failed-pair discovery attempts exhausted (${maxAttempts}); ${remainingPairs} pairs still need samples.`);
+    } else {
+      progress.log(`Finished failed-pair retry for ${location}.`);
+    }
+  }
+}
+
+async function benchmarkDatabases({
+  auth,
+  accountId,
+  config,
+  databasesToBenchmark,
+  workerPlacementsByD1Location,
+  placementBatches,
+  batchRecords,
+  discoveryWaveIndex,
+  runId,
+  tempDir,
+  workerSourcePath,
+  deployedWorkers,
+  workerRequestLimiter,
+  resultsDir,
+  rawResult,
+  progress
+}) {
+  for (let batchIndex = 0; batchIndex < placementBatches.length; batchIndex += 1) {
+    const placements = placementBatches[batchIndex];
+    const databasesForBatch = databasesToBenchmark.filter((database) =>
+      placements.some((placement) =>
+        placementsForDatabase(database, workerPlacementsByD1Location).includes(placement)
+      )
+    );
+    if (databasesForBatch.length === 0) continue;
+
+    const placementsForBatch = placements.filter((placement) =>
+      databasesForBatch.some((database) =>
+        placementsForDatabase(database, workerPlacementsByD1Location).includes(placement)
+      )
+    );
+    const batchRecord = batchRecords[batchIndex];
+    const batchWorkers = [];
+    progress.log(`Starting Worker batch ${batchIndex + 1}/${placementBatches.length} for failed-pair retry (${placementsForBatch.length} Workers)...`);
+
+    try {
+      const workers = await deployWorkers({
+        auth,
+        accountId,
+        config,
+        databases: databasesForBatch,
+        placements: placementsForBatch,
+        batchIndex,
+        discoveryWaveIndex,
+        runId,
+        tempDir,
+        workerSourcePath,
+        deployedWorkers,
+        progress
+      });
+      batchWorkers.push(...workers);
+      batchRecord.rounds.push({
+        index: discoveryWaveIndex,
+        databases: databasesForBatch.map((database) => ({
+          key: database.key,
+          targetLocation: database.targetLocation,
+          observedRegion: database.observedRegion,
+          observedColo: database.observedColo,
+          coloKey: database.coloKey,
+          attempt: database.discoveryAttempt,
+          repairExistingColocation: database.repairExistingColocation === true,
+          repairPlacements: database.repairPlacements
+        })),
+        workers
+      });
+      await persistProgress(resultsDir, rawResult);
+
+      if (config.propagationSeconds > 0) {
+        progress.log(`Starting Worker propagation wait (${config.propagationSeconds}s)...`);
+        await sleep(config.propagationSeconds * 1000);
+        progress.recordPropagationWait();
+        progress.log(`Finished Worker propagation wait (${config.propagationSeconds}s).`);
+      }
+
+      const measuredRequestsByRound = splitRequestsAcrossRounds(
+        config.benchmark.measuredRequests,
+        config.benchmark.splitInRounds
+      );
+
+      for (let roundIndex = 0; roundIndex < measuredRequestsByRound.length; roundIndex += 1) {
+        const benchmarkRoundLabel = `${roundIndex + 1}/${measuredRequestsByRound.length}`;
+        progress.log(`Starting failed-pair retry round ${benchmarkRoundLabel}.`);
+
+        for (const database of databasesForBatch) {
+          const placementSet = new Set(placementsForDatabase(database, workerPlacementsByD1Location));
+          ensureColoResultBucket(rawResult.warmup, database.key, database.coloKey);
+          ensureColoResultBucket(rawResult.measured, database.key, database.coloKey);
+
+          for (const worker of workers) {
+            if (!placementSet.has(worker.placement)) continue;
+
+            if (!rawResult.warmup[database.key][database.coloKey][worker.placement]) {
+              rawResult.warmup[database.key][database.coloKey][worker.placement] = [];
+            }
+            if (!rawResult.measured[database.key][database.coloKey][worker.placement]) {
+              rawResult.measured[database.key][database.coloKey][worker.placement] = [];
+            }
+
+            const measuredRequestsForPair = rawResult.measured[database.key][database.coloKey][worker.placement];
+            const requestsToMeasure = repairRequestCount(measuredRequestsForPair, config.benchmark.measuredRequests, database);
+            if (requestsToMeasure === 0) continue;
+
+            const pairLabel = `D1 ${database.label}/${database.coloKey} x Worker ${worker.placement}`;
+            progress.log(`Starting warmup: failed-pair retry ${benchmarkRoundLabel}, ${pairLabel} (${config.benchmark.warmupRequests} requests)...`);
+            const warmupResults = await runRequests({
+              worker,
+              database,
+              requests: config.benchmark.warmupRequests,
+              queriesPerRequest: config.benchmark.queriesPerRequest,
+              timeoutMs: config.benchmark.requestTimeoutMs,
+              progress,
+              requestLimiter: workerRequestLimiter
+            });
+            rawResult.warmup[database.key][database.coloKey][worker.placement].push(...warmupResults);
+            await persistProgress(resultsDir, rawResult);
+            progress.log(`Finished warmup: failed-pair retry ${benchmarkRoundLabel}, ${pairLabel} (${warmupResults.length} requests).`);
+
+            progress.log(`Starting measurement: failed-pair retry ${benchmarkRoundLabel}, ${pairLabel} (${requestsToMeasure} requests)...`);
+            const measuredResults = await runRequests({
+              worker,
+              database,
+              requests: requestsToMeasure,
+              queriesPerRequest: config.benchmark.queriesPerRequest,
+              timeoutMs: config.benchmark.requestTimeoutMs,
+              progress,
+              requestLimiter: workerRequestLimiter
+            });
+            const repair = repairMeasuredRequests({
+              existing: measuredRequestsForPair,
+              replacements: measuredResults,
+              measuredRequests: config.benchmark.measuredRequests,
+              database,
+              minSuccessfulRequests: config.benchmark.minSuccessfulRequests
+            });
+            await persistProgress(resultsDir, rawResult);
+            progress.log(
+              `Finished repair: failed-pair retry ${benchmarkRoundLabel}, ${pairLabel} (${repair.replaced}/${repair.attempted} failed measured requests replaced${repair.committed ? "" : "; pair still below minimum, measured data unchanged"}).`
+            );
+          }
+        }
+
+        progress.log(`Finished failed-pair retry round ${benchmarkRoundLabel}.`);
+      }
+
+      progress.log(`Finished Worker batch ${batchIndex + 1}/${placementBatches.length} for failed-pair retry.`);
+    } finally {
+      if (config.cleanupWorkers) {
+        await cleanupWorkers(batchWorkers.map((worker) => worker.name), accountId, progress);
+        removeDeployedWorkers(deployedWorkers, batchWorkers.map((worker) => worker.name));
+      }
+    }
+  }
+}
+
+function createFailedPairRepairGroups({ rawResult, workerPlacementsByD1Location, measuredRequests, minSuccessfulRequests }) {
+  const databases = (rawResult.databases || [rawResult.database]).filter(Boolean);
+  const databaseByKey = Object.fromEntries(databases.map((database) => [database.key, database]));
+  const groupsByLocation = new Map();
+
+  for (const databaseTarget of databases) {
+    const targetLocation = databaseTarget.targetLocation || databaseTarget.key;
+    const placements = workerPlacementsByD1Location[targetLocation] || [];
+    const coloKeys = unique([
+      ...(rawResult.databaseColocations || [])
+        .filter((database) => database.key === databaseTarget.key)
+        .map((database) => database.coloKey)
+        .filter(Boolean),
+      ...Object.keys(rawResult.measured?.[databaseTarget.key] || {})
+    ]);
+
+    for (const coloKey of coloKeys) {
+      const database = databaseForColocation(rawResult, databaseByKey, databaseTarget.key, coloKey);
+      for (const placement of placements) {
+        const requests = rawResult.measured?.[database.key]?.[coloKey]?.[placement] || [];
+        if (!isPairRepairNeeded({ requests, database, measuredRequests, minSuccessfulRequests })) continue;
+
+        if (!groupsByLocation.has(targetLocation)) groupsByLocation.set(targetLocation, new Map());
+        const groupsByColo = groupsByLocation.get(targetLocation);
+        if (!groupsByColo.has(coloKey)) {
+          groupsByColo.set(coloKey, {
+            database,
+            placements: new Set()
+          });
+        }
+        groupsByColo.get(coloKey).placements.add(placement);
+      }
+    }
+  }
+
+  return groupsByLocation;
+}
+
+function countRepairGroups(groupsByLocation) {
+  let count = 0;
+  for (const groupsByColo of groupsByLocation.values()) {
+    for (const group of groupsByColo.values()) count += group.placements.size;
+  }
+  return count;
+}
+
+function hasPendingRepairGroups(groupsByColo, rawResult, config) {
+  return pendingRepairPairCount(groupsByColo, rawResult, config) > 0;
+}
+
+function pendingRepairPairCount(groupsByColo, rawResult, config) {
+  let count = 0;
+  for (const group of groupsByColo.values()) {
+    count += pendingRepairPlacements({
+      rawResult,
+      database: group.database,
+      placements: group.placements,
+      measuredRequests: config.benchmark.measuredRequests,
+      minSuccessfulRequests: config.benchmark.minSuccessfulRequests
+    }).length;
+  }
+  return count;
+}
+
+function pendingRepairPlacements({ rawResult, database, placements, measuredRequests, minSuccessfulRequests }) {
+  return [...placements].filter((placement) => {
+    const requests = rawResult.measured?.[database.key]?.[database.coloKey]?.[placement] || [];
+    return isPairRepairNeeded({ requests, database, measuredRequests, minSuccessfulRequests });
+  });
 }
 
 async function prepareDisposableDatabase({ auth, accountId, config, runId, location, discoveryWaveIndex, attempt, progress }) {
@@ -1608,52 +2023,77 @@ function placementsForDatabase(database, workerPlacementsByD1Location) {
   return configured.filter((placement) => repairPlacements.has(placement));
 }
 
-function repairPlacementsForDatabase({ rawResult, database, workerPlacementsByD1Location, minSuccessfulRequests }) {
+function repairPlacementsForDatabase({ rawResult, database, workerPlacementsByD1Location, measuredRequests }) {
   const byPlacement = rawResult.measured?.[database.key]?.[database.coloKey] || {};
   return (workerPlacementsByD1Location[database.targetLocation] || []).filter((placement) => {
     const requests = Array.isArray(byPlacement[placement]) ? byPlacement[placement] : [];
-    const measurements = getPairMeasurements({ requests, database });
-    return !isPairReliable(measurements.successful.length, minSuccessfulRequests);
+    return repairRequestCount(requests, measuredRequests, database) > 0;
   });
 }
 
-function repairRequestCount(existing, measuredRequests) {
-  const requests = Array.isArray(existing) ? existing : [];
-  const failed = requests.filter((request) => !request?.ok).length;
+function repairRequestCount(existing, measuredRequests, database) {
+  const requests = Array.isArray(existing) ? existing.slice(0, measuredRequests) : [];
+  const failed = requests.filter((request) => requestNeedsRepair(request, database)).length;
   const missing = Math.max(0, measuredRequests - requests.length);
   return failed + missing;
 }
 
-function repairMeasuredRequests({ existing, replacements, measuredRequests }) {
+function repairMeasuredRequests({ existing, replacements, measuredRequests, database, minSuccessfulRequests }) {
+  const target = Number.isInteger(minSuccessfulRequests) && minSuccessfulRequests > 0
+    ? existing.slice()
+    : existing;
   let replaced = 0;
   let successful = 0;
 
   for (const replacement of replacements) {
-    if (!replacement?.ok) continue;
+    if (requestNeedsRepair(replacement, database)) continue;
     successful += 1;
 
-    const index = firstFailedRequestIndex(existing);
+    const index = firstRepairableRequestIndex(target, measuredRequests, database);
     if (index >= 0) {
-      existing[index] = replacement;
+      target[index] = replacement;
       replaced += 1;
-    } else if (existing.length < measuredRequests) {
-      existing.push(replacement);
+    } else if (target.length < measuredRequests) {
+      target.push(replacement);
       replaced += 1;
     }
+  }
+
+  const committed = !Number.isInteger(minSuccessfulRequests) ||
+    minSuccessfulRequests < 1 ||
+    getPairMeasurements({ requests: target.slice(0, measuredRequests), database }).successful.length >= minSuccessfulRequests;
+
+  if (committed && target !== existing) {
+    existing.length = 0;
+    existing.push(...target);
   }
 
   return {
     attempted: replacements.length,
     successful,
-    replaced
+    replaced: committed ? replaced : 0,
+    committed
   };
 }
 
-function firstFailedRequestIndex(requests) {
-  for (let index = 0; index < requests.length; index += 1) {
-    if (!requests[index]?.ok) return index;
+function firstRepairableRequestIndex(requests, measuredRequests, database) {
+  for (let index = 0; index < Math.min(requests.length, measuredRequests); index += 1) {
+    if (requestNeedsRepair(requests[index], database)) return index;
   }
   return -1;
+}
+
+function requestNeedsRepair(request, database) {
+  if (!request?.ok || !request.body) return true;
+  if (!database) return false;
+  const measurements = getPairMeasurements({ requests: [request], database });
+  return Object.values(measurements.noteCounts || {}).some((count) => Number(count) > 0);
+}
+
+function isPairRepairNeeded({ requests, database, measuredRequests, minSuccessfulRequests }) {
+  const measured = Array.isArray(requests) ? requests.slice(0, measuredRequests) : [];
+  const measurements = getPairMeasurements({ requests: measured, database });
+  return measurements.successful.length < minSuccessfulRequests;
 }
 
 function splitRequestsAcrossRounds(requests, rounds) {
@@ -2083,12 +2523,13 @@ function printResumeCommands({ rootDir = process.cwd(), resultsDir } = {}) {
 
   const resumePath = path.relative(rootDir, resultsDir) || ".";
   const resumeArg = shellQuote(resumePath);
+  const command = activeRunContext?.retryFailed ? "--retry-failed" : "--resume";
   console.error("");
   console.error("Benchmark did not complete.");
   console.error(`Resume from ${resultsDir}:`);
-  console.error(`  npm run benchmark -- --resume ${resumeArg}`);
+  console.error(`  npm run benchmark -- ${command} ${resumeArg}`);
   console.error("Resume in background:");
-  console.error(`  nohup npm run benchmark -- --resume ${resumeArg} >> benchmark.log 2>&1 &`);
+  console.error(`  nohup npm run benchmark -- ${command} ${resumeArg} >> benchmark.log 2>&1 &`);
 }
 
 function shellQuote(value) {
