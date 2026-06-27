@@ -38,7 +38,6 @@ body {
   --cardbg: #ffffff; --ocean: #dde6ef; --land: #b3c1d1; --txt: #1b2533; --foot: #5a6675;
   --fademid: rgba(255,255,255,.42); --fadeend: rgba(255,255,255,.82);
 }
-[data-theme="light"] .v12name, [data-theme="light"] .v12val, [data-theme="light"] .v12loc { text-shadow: 0 1px 6px rgba(255,255,255,.7); }
 
 .topbar {
   position: absolute; top: 18px; z-index: 50;
@@ -74,6 +73,7 @@ body {
 .wrap { max-width: 1180px; margin: 0 auto; padding: 80px 20px 96px; }
 h1 { font-size: 58px; font-weight: 800; margin: 0 0 40px; letter-spacing: -1.2px; line-height: 1.04; }
 h2 { font-size: 29px; font-weight: 700; margin: 52px 0 20px; letter-spacing: -.5px; }
+h2.hx-h2 { margin: 26px 0 14px; }
 .sub { color: var(--muted); font-size: 14px; line-height: 1.55; margin: 0 0 12px; max-width: 760px; }
 h2.why { margin-top: 0; }
 .intro { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 44px; align-items: center; margin-bottom: 20px; }
@@ -185,7 +185,7 @@ a:hover { text-decoration: underline; }
 .seg-btn.active { background: var(--accent-2); color: #fff; }
 
 /* ===== "Best worker regions" — 5 concept explorations ===== */
-.hx-lab { display: flex; flex-direction: column; gap: 30px; margin: 8px 0 56px; }
+.hx-lab { display: flex; flex-direction: column; gap: 30px; margin: 0 0 18px; }
 .hx-cap { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
 .hx { border-radius: 16px; position: relative; overflow: hidden; }
 
@@ -422,27 +422,15 @@ a:hover { text-decoration: underline; }
 .hx12.s-clay { --bg1: #1a1817; --bg2: #100f0e; --bd: #2c2926; --ac: #cf8259; --tabbd: #352f2a;
   --mut: #948b83; --cardbg: #161413; --ocean: #131110; --land: #34302c; --txt: #efe9e4; --foot: #c4bbb3;
   --fademid: rgba(16,15,14,.5); --fadeend: rgba(16,15,14,.88); }
-.hx12head { display: flex; align-items: center; justify-content: flex-start; margin-bottom: 56px; }
+.hx12head { display: flex; align-items: center; justify-content: flex-start; margin-bottom: 14px; }
 .hx12kick { font-size: 11px; letter-spacing: .24em; text-transform: uppercase; color: var(--ac); font-weight: 700; }
 .hx12tabs { display: flex; gap: 0; }
 .v12tab { font-family: "Bricolage Grotesque", sans-serif; font-size: 11px; font-weight: 600; background: none; border: 1px solid var(--tabbd); color: var(--mut); padding: 4px 10px; border-radius: 999px; cursor: pointer; }
 .v12tab.on { color: #fff; background: var(--ac); border-color: var(--ac); }
-.v12grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
-.v12card { border-radius: 14px; overflow: hidden; background: var(--cardbg); border: 1px solid var(--bd); box-shadow: none; cursor: pointer; transition: transform .15s ease, border-color .15s ease; outline: none; }
-.v12card:hover { transform: translateY(-2px); }
-.v12card.sel { border-color: var(--ac); box-shadow: 0 0 0 2px var(--ac), var(--card-shadow); }
-.v12card:focus-visible { border-color: var(--ac); }
-.v12map { position: relative; height: 185px; background: var(--ocean); overflow: hidden; }
-.v12svg { width: 100%; height: 100%; display: block; }
-.v12land path { fill: var(--land); stroke: var(--ocean); stroke-width: .6; }
-.v12halo { fill: var(--ac); opacity: .16; }
-.v12pin { fill: var(--ac); stroke: #fff; stroke-width: 1.6; }
-.v12fade { position: absolute; inset: 0; background: linear-gradient(to bottom, transparent 0%, transparent 52%, var(--fademid) 74%, var(--fadeend) 100%); }
-.v12name { position: absolute; top: 11px; left: 13px; right: 13px; font-size: 13px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--txt); text-shadow: 0 1px 7px rgba(0,0,0,.7); }
-.v12foot { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px 12px; color: var(--foot); }
-.v12val { font-size: 30px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; color: var(--txt); text-shadow: 0 1px 8px rgba(0,0,0,.55); }
-.v12val span { font-size: 13px; font-weight: 600; margin-left: 2px; color: var(--mut); }
-.v12loc { font-size: 11px; font-weight: 600; margin-top: 6px; color: var(--foot); word-break: break-word; text-shadow: 0 1px 6px rgba(0,0,0,.7); }
+.v12grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; align-items: start; }
+/* No card box: each D1 is just a title plus a vertical list of pills. */
+.v12card { background: none; border: none; }
+.v12name { padding: 0 2px 8px; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--foot); }
 @media (max-width: 760px) { .v3grid, .v7grid, .v10grid, .v11grid { grid-template-columns: 1fr 1fr; } }
 /* map-card grid: 6 across, then 3, then 2 */
 @media (max-width: 1000px) { .v12grid { grid-template-columns: repeat(3, 1fr); } }
@@ -626,25 +614,37 @@ table.matrix th.rowhead { text-align: left; }
 .d1-colo, .placement-colo { color: var(--muted); font-weight: 500; }
 .map-name { position: absolute; top: 16px; left: max(20px, calc((100vw - 1180px) / 2 + 20px)); z-index: 2; font-size: 16px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text); text-shadow: 0 1px 8px rgba(0,0,0,.55); pointer-events: none; }
 .list-title { font-size: 16px; font-weight: 600; letter-spacing: .04em; color: var(--text); margin: 0 0 18px; }
-.d1loc-panel {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
-  margin: 0 0 20px;
+/* Per-D1 colo list, styled like the metric segmented control but stacked
+   vertically: one outer border, hairline separators, accent-filled selection.
+   `--c` is the per-location latency colour (set inline per pill). */
+.v12colos { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.v12colo {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 10px; border: none; border-top: 1px solid var(--border);
+  background: var(--panel); color: var(--text); font: inherit; cursor: pointer; text-align: left;
+  transition: background .12s ease;
 }
-.d1loc-label {
-  font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--muted);
-}
-.d1loc-tabs { display: flex; flex-wrap: wrap; gap: 7px; }
-.d1loc-tab {
-  display: inline-flex; align-items: baseline; gap: 8px;
-  min-height: 30px; border: 1px solid var(--border); border-radius: 7px;
-  padding: 0 10px; background: var(--panel); color: var(--text);
-  font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
-}
-.d1loc-tab:hover { border-color: var(--accent-2); }
-.d1loc-tab.active { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
-.d1loc-best { color: var(--muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.d1loc-tab.active .d1loc-best { color: rgba(255,255,255,.78); }
+.v12colo:first-child { border-top: none; }
+.v12colo:hover { background: color-mix(in srgb, var(--accent-2) 9%, var(--panel)); }
+.v12colo.on { background: var(--accent-2); }
+.v12colo:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.v12colo-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.v12colo-name { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--text); }
+.v12colo-val { font-size: 12px; font-weight: 700; color: var(--c, var(--text)); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.v12colo-val i { font-style: normal; font-size: 10px; font-weight: 600; color: var(--muted); margin-left: 1px; }
+.v12colo-worker { font-size: 10.5px; font-weight: 400; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v12colo-worker .placement-colo { color: var(--muted); font-weight: 400; }
+/* selected segment: white text on the accent fill, like the active metric button */
+.v12colo.on .v12colo-name,
+.v12colo.on .v12colo-val,
+.v12colo.on .v12colo-val i,
+.v12colo.on .v12colo-worker,
+.v12colo.on .v12colo-worker .placement-colo { color: #fff; }
+/* best worker in a different colo than this D1 location: soft radish highlight */
+.v12colo-worker .colo-mismatch { color: #d9667a; }
+.v12colo.on .v12colo-worker .colo-mismatch { color: #ffc2cd; }
+.d1nav-num { font-variant-numeric: tabular-nums; }
+.d1nav-na { color: var(--mut); }
 .route-d1 { color: #ffb066; }
 [data-theme="light"] .map-name { text-shadow: 0 1px 6px rgba(255,255,255,.85); }
 .mapwrap.full { margin-left: calc(50% - 50vw); margin-right: calc(50% - 50vw); border-radius: 0; margin-bottom: 34px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
@@ -656,7 +656,7 @@ table.matrix th.rowhead { text-align: left; }
 .regionmap .md1halo { fill: var(--accent-2); opacity: .16; }
 .regionmap .md1label { fill: var(--text); font-size: 15px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; paint-order: stroke; stroke: var(--map-ocean); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
 .regionmap .md1label .md1colo { fill: var(--muted); font-weight: 500; }
-[data-theme="dark"] .v12pin, [data-theme="dark"] .regionmap .md1 { stroke: rgba(0,0,0,.5); }
+[data-theme="dark"] .regionmap .md1 { stroke: rgba(0,0,0,.5); }
 .regionmap .mw { cursor: pointer; transition: r .1s ease; }
 .regionmap .mw:hover { r: 9; }
 .maptip {

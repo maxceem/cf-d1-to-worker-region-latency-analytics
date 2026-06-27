@@ -2,7 +2,7 @@
 const MODEL = JSON.parse(document.getElementById("report-data").textContent);
 const METRICS = window.MetricStats.METRICS;
 const DEFAULT_AGGREGATE_METRIC = window.MetricStats.DEFAULT_AGGREGATE_METRIC;
-const state = { db: (MODEL.databases[0] && MODEL.databases[0].key) || "all",
+const state = { db: "all",
   metric: DEFAULT_AGGREGATE_METRIC, sort: "metric", dir: 1, matrixSort: DEFAULT_AGGREGATE_METRIC, matrixDir: 1, regionView: "list",
   d1ColoByDb: {},
   heroM: { 1: DEFAULT_AGGREGATE_METRIC, 2: DEFAULT_AGGREGATE_METRIC, 3: DEFAULT_AGGREGATE_METRIC, 4: DEFAULT_AGGREGATE_METRIC,
@@ -169,11 +169,12 @@ function renderRegionPanel() {
   wireRegionPanel();
 }
 
-function syncMapCardSelection() {
-  document.querySelectorAll(".v12card[data-db]").forEach(card => {
-    const selected = state.db === card.getAttribute("data-db");
-    card.classList.toggle("sel", selected);
-    card.setAttribute("aria-pressed", selected ? "true" : "false");
+function syncColoSelection() {
+  document.querySelectorAll(".v12colo[data-d1-colo]").forEach(pill => {
+    const db = pill.getAttribute("data-db");
+    const on = state.db === db && state.d1ColoByDb[db] === pill.getAttribute("data-d1-colo");
+    pill.classList.toggle("on", on);
+    pill.setAttribute("aria-pressed", on ? "true" : "false");
   });
 }
 
@@ -352,7 +353,7 @@ function metricSwitch(label) {
 }
 
 function heroExplorations() {
-  return '<h2>Best worker location per D1 region</h2>' +
+  return '<h2 class="hx-h2">Best worker location per D1 region</h2>' +
     '<div class="hx-lab">' + heroV13() + '</div>';
 }
 
@@ -644,41 +645,12 @@ function heroV11() {
 function cartoSpot(ver, schemeCls, kicker) {
   const entries = bestPerDb(state.metric);
   const scale = metricScale(state.metric);
-  const B = MODEL.basemap;
-  let landPaths = "";
-  if (B) for (const d of B.paths) landPaths += '<path d="' + d + '"/>';
   let cards = "";
   for (const e of entries) {
-    const has = !!e.best;
-    const col = has ? metricColor(e.best.value, scale) : null;
-    const ll = dbCoord(e.key);
-    let map = "";
-    if (ll && B) {
-      const cx = (ll[1] + 180) / 360 * B.w;
-      const cy = (90 - ll[0]) / 180 * B.h;
-      const wide = (e.key || "").toLowerCase() === "oc";
-      const vw = wide ? 560 : 320, vh = wide ? 400 : 230;
-      let x0 = Math.max(0, Math.min(B.w - vw, cx - vw / 2));
-      let y0 = Math.max(0, Math.min(B.h - vh, cy - vh / 2));
-      // Scale the dot to the crop width so it renders the same size on every card.
-      const pr = vw / 70, hr = vw / 35, sw = vw / 350;
-      map = '<svg class="v12svg" viewBox="' + x0 + ' ' + y0 + ' ' + vw + ' ' + vh +
-        '" preserveAspectRatio="xMidYMid slice">' +
-        '<g class="v12land">' + landPaths + '</g>' +
-        '<circle class="v12halo" cx="' + cx + '" cy="' + cy + '" r="' + hr + '"></circle>' +
-        '<circle class="v12pin" cx="' + cx + '" cy="' + cy + '" r="' + pr + '" stroke-width="' + sw + '"></circle>' +
-      '</svg>';
-    }
-    const sel = state.db === e.key ? " sel" : "";
-    cards += '<div class="v12card' + sel + '" data-db="' + esc(e.key) + '" tabindex="0" role="button" aria-pressed="' + (sel ? "true" : "false") + '">' +
-      '<div class="v12map">' + map +
-        '<div class="v12fade"></div>' +
-        '<div class="v12name">' + (e.nameHtml || esc(e.name)) + '</div>' +
-        '<div class="v12foot">' +
-          '<div class="v12val"' + (col ? ' style="color:' + col + '"' : '') + '>' + (has ? fmtNum(e.best.value) : "—") + '<span>ms</span></div>' +
-          '<div class="v12loc">' + (has ? pairRouteHtml(e.best.pair) : "no data") + '</div>' +
-        '</div>' +
-      '</div>' +
+    // The card itself is not interactive or selectable; only its colo pills are.
+    cards += '<div class="v12card">' +
+      '<div class="v12name">' + (e.nameHtml || esc(e.name)) + '</div>' +
+      d1ColoMiniList(e.key, scale) +
     '</div>';
   }
   return '<section class="hx hx12 ' + schemeCls + '">' +
@@ -850,9 +822,10 @@ function regionPanel() {
   const bars = pairBars(ranked, winner, false, scale);
   const selectedDb = (d.colocations || []).find(item => item.coloKey === selectedColo) || d;
 
+  // The D1 location (colo) picker lives inside each small region card above, so
+  // every D1's colos stay visible at all times; this panel just maps the choice.
   return '<div class="mapwrap full"><div class="map-name">' + pairD1LabelHtml(winner) + '</div>' +
       regionMap(selectedDb, ranked, scale) + '</div>' +
-    d1ColoTabs(d, coloKeys, selectedColo, allPairs) +
     '<div class="list-title">' + pairD1LabelHtml(winner) + ' to worker locations</div>' +
     '<div class="bars">' + bars + '</div>';
 }
@@ -866,18 +839,68 @@ function selectedD1Colo(d, pairs, coloKeys) {
   return selected;
 }
 
-function d1ColoTabs(d, coloKeys, selectedColo, pairs) {
-  const buttons = coloKeys.map(coloKey => {
-    const best = pairs.filter(p => (p.d1ColoKey || "unknown") === coloKey).slice().sort((a, b) => metricVal(a) - metricVal(b))[0];
-    const label = coloKey === "unknown" ? "Unknown" : coloKey;
-    const suffix = best ? '<span class="d1loc-best">' + fmt(metricVal(best)) + '</span>' : "";
-    return '<button class="d1loc-tab' + (selectedColo === coloKey ? " active" : "") + '" type="button" data-d1-colo="' + esc(coloKey) + '">' +
-      '<span>' + esc(label) + '</span>' + suffix + '</button>';
+// One entry per physical D1 location (colo) for the selected region, carrying its
+// fastest worker pairing + latency, sorted fastest-first so the list reads at a glance.
+function d1NavEntries(coloKeys, allPairs, scale) {
+  return coloKeys.map(coloKey => {
+    const subset = allPairs.filter(p => (p.d1ColoKey || "unknown") === coloKey && metricVal(p) != null);
+    const best = subset.slice().sort((a, b) => metricVal(a) - metricVal(b))[0] || null;
+    const value = best ? metricVal(best) : null;
+    return {
+      coloKey,
+      label: coloKey === "unknown" ? "Unknown" : coloKey,
+      best,
+      value,
+      color: value != null ? metricColor(value, scale) : null,
+    };
+  }).sort((a, b) => {
+    if (a.value == null && b.value == null) return 0;
+    if (a.value == null) return 1;
+    if (b.value == null) return -1;
+    return a.value - b.value;
+  });
+}
+function d1NavVal(e) {
+  if (e.value == null) return '<span class="d1nav-na">—</span>';
+  return '<span class="d1nav-num">' + fmtNum(e.value) + '</span><i>ms</i>';
+}
+function d1NavWorker(e) {
+  if (!e.best) return '<span class="d1nav-na">no data</span>';
+  const entries = placementColoEntries(e.best);
+  if (!entries.length) return esc(e.best.placement);
+  // Highlight each individual worker colo that differs from this D1 location's
+  // colo. "-" means no colo was reported, so it is never flagged as a mismatch.
+  const d1Colo = (e.coloKey || "").toLowerCase();
+  const knowsD1 = !!d1Colo && d1Colo !== "unknown";
+  const parts = entries.map(([name]) => {
+    const isColo = name && name !== "-";
+    const mismatch = knowsD1 && isColo && name.toLowerCase() !== d1Colo;
+    return mismatch ? '<span class="colo-mismatch">' + esc(name) + '</span>' : esc(name);
+  }).join(",");
+  return esc(e.best.placement) + ' <span class="placement-colo">/ ' + parts + '</span>';
+}
+// Compact colo list shown inside each small D1 map card (rendered by cartoSpot),
+// so every D1's physical locations stay visible and clickable at all times.
+// Clicking a pill selects that D1 + colo and remaps the panel below.
+function d1ColoMiniList(dbKey, scale) {
+  const allPairs = MODEL.pairs.filter(p => p.dbKey === dbKey && metricVal(p) != null);
+  const coloKeys = unique(allPairs.map(p => p.d1ColoKey || "unknown"));
+  const entries = d1NavEntries(coloKeys, allPairs, scale);
+  if (!entries.length) return "";
+  const selectedColo = state.db === dbKey ? state.d1ColoByDb[dbKey] : null;
+  const pills = entries.map(e => {
+    const on = e.coloKey === selectedColo;
+    const cs = e.color ? ' style="--c:' + e.color + '"' : '';
+    return '<button type="button" class="v12colo' + (on ? ' on' : '') + '" data-db="' + esc(dbKey) +
+        '" data-d1-colo="' + esc(e.coloKey) + '" aria-pressed="' + (on ? 'true' : 'false') + '"' + cs + '>' +
+      '<span class="v12colo-top">' +
+        '<span class="v12colo-name">' + esc(e.label) + '</span>' +
+        '<span class="v12colo-val">' + d1NavVal(e) + '</span>' +
+      '</span>' +
+      '<span class="v12colo-worker">' + d1NavWorker(e) + '</span>' +
+    '</button>';
   }).join("");
-  return '<div class="d1loc-panel">' +
-    '<div class="d1loc-label">' + dbLabelHtml(d.key) + ' database locations</div>' +
-    '<div class="d1loc-tabs">' + buttons + '</div>' +
-  '</div>';
+  return '<div class="v12colos">' + pills + '</div>';
 }
 
 function allRegionPanel() {
@@ -1031,18 +1054,17 @@ function wire() {
     t.onclick = () => { state.metric = t.getAttribute("data-metric"); render(); };
   });
   wireRegionPanel();
-  // Clicking a map card selects that D1 region for the stats below.
-  document.querySelectorAll(".v12card[data-db]").forEach(c => {
-    const pick = () => {
-      const db = c.getAttribute("data-db");
-      state.db = state.db === db ? "all" : db;
+  // Only a colo pill is interactive: it selects that exact D1 location and maps it.
+  document.querySelectorAll(".v12colo[data-d1-colo]").forEach(pill => {
+    pill.onclick = () => {
+      const db = pill.getAttribute("data-db");
+      state.db = db;
+      state.d1ColoByDb[db] = pill.getAttribute("data-d1-colo");
       state.sort = "metric";
       state.dir = 1;
-      syncMapCardSelection();
       renderRegionPanel();
+      syncColoSelection();
     };
-    c.onclick = pick;
-    c.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } };
   });
   document.querySelectorAll("th[data-msort]").forEach(th => {
     th.onclick = () => {
@@ -1055,13 +1077,8 @@ function wire() {
 }
 
 function wireRegionPanel() {
-  document.querySelectorAll("[data-d1-colo]").forEach(button => {
-    button.onclick = () => {
-      if (state.db === "all") return;
-      state.d1ColoByDb[state.db] = button.getAttribute("data-d1-colo");
-      renderRegionPanel();
-    };
-  });
+  // Colo pills live in the cards (wired in wire()), not in this panel; this
+  // function only wires the map tooltip and the worker table sort headers.
   // Custom tooltip for worker dots on the map.
   const map = document.querySelector(".regionmap");
   const tip = document.getElementById("maptip");
@@ -1110,6 +1127,20 @@ function wireRegionPanel() {
   });
 }
 
+// Pre-select the first colo of the first card so the map starts on a real
+// location (the fastest colo of the first D1 region) rather than the all view.
+function selectDefaultColo() {
+  const first = MODEL.databases[0];
+  if (!first) return;
+  const allPairs = MODEL.pairs.filter(p => p.dbKey === first.key && metricVal(p) != null);
+  const coloKeys = unique(allPairs.map(p => p.d1ColoKey || "unknown"));
+  const entries = d1NavEntries(coloKeys, allPairs, metricScale());
+  if (!entries.length) return;
+  state.db = first.key;
+  state.d1ColoByDb[first.key] = entries[0].coloKey;
+}
+
 Site.initTheme();
 Site.setAppClass("wrap");
+selectDefaultColo();
 render();
