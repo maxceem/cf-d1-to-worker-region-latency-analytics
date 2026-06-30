@@ -245,31 +245,40 @@ function ideaDiagram() {
 
 function metaFooter() {
   const r = MODEL.run;
+  const runs = MODEL.runs || [];
   const b = r.benchmark || {};
   const num = (n) => (n == null ? "—" : Number(n).toLocaleString());
   const fmtTime = (iso) => {
     const d = new Date(iso);
     return isNaN(d) ? "—" : d.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
   };
-  let window = "—", duration = "—";
+  const fmtWindow = (run) => {
+    if (!run.startedAt && !run.completedAt) return run.label || run.id || "—";
+    if (!run.startedAt || !run.completedAt) return fmtTime(run.startedAt || run.completedAt);
+    const s = new Date(run.startedAt), e = new Date(run.completedAt);
+    const sameDay = s.toDateString() === e.toDateString();
+    const endStr = sameDay ? e.toLocaleString([], { hour: "numeric", minute: "2-digit" }) : fmtTime(run.completedAt);
+    return fmtTime(run.startedAt) + " → " + endStr;
+  };
+  let duration = "—";
   if (r.startedAt && r.completedAt) {
     const s = new Date(r.startedAt), e = new Date(r.completedAt);
-    const sameDay = s.toDateString() === e.toDateString();
-    const endStr = sameDay ? e.toLocaleString([], { hour: "numeric", minute: "2-digit" }) : fmtTime(r.completedAt);
-    window = fmtTime(r.startedAt) + " → " + endStr;
     const mins = Math.round((e - s) / 60000);
     duration = (mins >= 60 ? Math.floor(mins / 60) + "h " : "") + (mins % 60) + "m";
   }
   const measured = b.measuredRequests != null
     ? b.measuredRequests
     : Math.max.apply(null, MODEL.pairs.map(p => p.requestCount || 0).concat(0));
-  const totalReq = MODEL.pairs.length * measured;
-  const successfulReq = MODEL.pairs.reduce((sum, p) => sum + (p.successCount || 0), 0);
+  const totalReq = MODEL.pairs.reduce((sum, p) => sum + (p.requestCount || 0), 0);
   const failedReq = MODEL.pairs.reduce((sum, p) => sum + (p.errorCount || 0), 0);
   const row = (k, v, cls) => '<tr><th scope="row">' + k + '</th><td' +
     (cls ? ' class="' + cls + '"' : '') + '>' + v + '</td></tr>';
+  const runWindowList = runs.length > 1
+    ? '<div class="run-window-list">' + runs.map(run => '<div>' + esc(fmtWindow(run)) + '</div>').join("") + '</div>'
+    : "";
   const rows =
-    row("Run window", esc(window), "long") +
+    (runs.length > 1 ? row("Runs", num(runs.length)) : "") +
+    (runs.length > 1 ? row("Run windows", runWindowList, "long") : row("Run window", esc(fmtWindow(r)), "long")) +
     row("Duration", duration) +
     row("D1 regions", num(MODEL.databases.length)) +
     row("Worker locations", num(MODEL.placements.length)) +
@@ -280,7 +289,7 @@ function metaFooter() {
     row("Warm-up per pairing", num(b.warmupRequests)) +
     row("Request timeout", b.requestTimeoutMs != null ? Math.round(b.requestTimeoutMs / 1000) + " s" : "—") +
     row("Total measured requests", num(totalReq)) +
-    row("Successful measured requests", num(successfulReq) + (failedReq ? " successful, " + num(failedReq) + " failed" : ""));
+    row("Failed requests", num(failedReq));
   return '<section class="details">' +
     '<h2>How this was measured</h2>' +
     '<p class="sub">Every Worker location was benchmarked against every D1 region. For each pairing we sent ' +

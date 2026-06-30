@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 // Build a self-contained, interactive static website from a benchmark
-// raw.json file. Lets you compare Worker placements per D1 region, see the whole
+// raw.json files. Lets you compare Worker placements per D1 region, see the whole
 // matrix at once, or filter down to a single D1 region to pick its best Worker.
 //
 // Usage:
 //   node ./src/build-html-site.mjs [--input results/raw.json] [--output docs/index.html]
+//   node ./src/build-html-site.mjs results/run-a results/run-b [--output docs/index.html]
 //
 // Defaults: reads the newest available raw.json and writes docs/index.html.
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getMinSuccessfulRequests,
@@ -40,8 +41,9 @@ async function main() {
     return;
   }
 
-  const inputPath = await resolveInputPath(args.input);
-  const raw = JSON.parse(await readFile(inputPath, "utf8"));
+  const inputPaths = await resolveInputPaths(args.inputs);
+  const rawInputs = await readRawInputs(inputPaths);
+  const raw = combineRawInputs(rawInputs);
   const [basemap, d1LocationCoordinates, providerRegionCoordinates, workerColoCoordinates] = await Promise.all([
     readJson("data/world-basemap.json"),
     readJson("data/d1-location-coordinates.json"),
@@ -54,7 +56,7 @@ async function main() {
   model.coords = providerRegionCoordinates;
   model.coloCoords = workerColoCoordinates;
   model.repoUrl = REPO_URL;
-  const exploreDataModel = buildRawModel(raw);
+  const exploreDataModel = buildRawModel(raw, rawInputs);
   exploreDataModel.repoUrl = REPO_URL;
 
   const outputPath = resolvePath(args.output || DEFAULT_OUTPUT_PATH);
@@ -104,16 +106,15 @@ function openInBrowser(filePath) {
 }
 
 function parseArgs(argv) {
-  const args = { input: null, output: null, help: false, open: true };
+  const args = { inputs: [], output: null, help: false, open: true };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === "--help" || flag === "-h") args.help = true;
-    else if (flag === "--input" || flag === "-i") args.input = argv[++i];
+    else if (flag === "--input" || flag === "-i") args.inputs.push(argv[++i]);
     else if (flag === "--output" || flag === "-o") args.output = argv[++i];
     else if (flag === "--no-open") args.open = false;
     else if (flag === "--open") args.open = true;
-    else if (!args.input) args.input = flag;
-    else throw new Error(`Unexpected argument: ${flag}`);
+    else args.inputs.push(flag);
   }
   return args;
 }
@@ -122,17 +123,18 @@ function printHelp() {
   console.log(`Build an interactive static website from benchmark raw data.
 
 Usage:
-  node ./src/build-html-site.mjs [--input <raw.json>] [--output <docs/index.html>]
+  node ./src/build-html-site.mjs [--input <raw.json|run-dir> ...] [--output <docs/index.html>]
+  node ./src/build-html-site.mjs <raw.json|run-dir> [raw.json|run-dir ...]
 
 Options:
-  -i, --input   Path to raw.json (default: newest of results/raw.json and results-partial/raw.json)
+  -i, --input   Path to raw.json or a results run folder. May be repeated.
   -o, --output  Path to write the HTML file (default: docs/index.html)
       --no-open Do not open the generated site in a browser
   -h, --help    Show this help`);
 }
 
-async function resolveInputPath(explicit) {
-  if (explicit) return resolvePath(explicit);
+async function resolveInputPaths(explicitInputs) {
+  if (explicitInputs.length) return Promise.all(explicitInputs.map(resolveRawInputPath));
   const candidates = [];
   const resultsDir = resolvePath("results");
   try {
@@ -151,17 +153,158 @@ async function resolveInputPath(explicit) {
   }
   if (candidates.length > 0) {
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return candidates[0].full;
+    return [candidates[0].full];
   }
-  return resolvePath("results/raw.json");
+  return [resolvePath("results/raw.json")];
+}
+
+async function resolveRawInputPath(input) {
+  const full = resolvePath(input);
+  const info = await stat(full);
+  return info.isDirectory() ? resolve(full, "raw.json") : full;
 }
 
 function resolvePath(value) {
   return isAbsolute(value) ? value : resolve(rootDir, value);
 }
 
+async function readRawInputs(inputPaths) {
+  return Promise.all(inputPaths.map(async (path, index) => {
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    return {
+      path,
+      raw,
+      run: buildRunSummary(raw.run || {}, path, index),
+    };
+  }));
+}
+
 async function readJson(path) {
   return JSON.parse(await readFile(resolve(rootDir, path), "utf8"));
+}
+
+function combineRawInputs(inputs) {
+  if (!inputs.length) throw new Error("At least one raw input is required.");
+  if (inputs.length === 1) {
+    const raw = structuredClone(inputs[0].raw);
+    raw.runs = [inputs[0].run];
+    raw.run = buildCombinedRun(inputs);
+    return raw;
+  }
+
+  return {
+    run: buildCombinedRun(inputs),
+    runs: inputs.map((input) => input.run),
+    databases: uniqueBy(inputs.flatMap((input) => input.raw.databases || []), (db) => db.key),
+    databaseColocations: uniqueBy(
+      inputs.flatMap((input) => input.raw.databaseColocations || []),
+      (record) => `${record.key}|${record.coloKey || record.observedColo || "unknown"}`
+    ),
+    workerPlacements: uniqueValues(inputs.flatMap((input) => input.raw.workerPlacements || [])),
+    measured: mergeMeasuredRuns(inputs),
+  };
+}
+
+function buildCombinedRun(inputs) {
+  const runs = inputs.map((input) => input.raw.run || {});
+  const startedAt = minIso(runs.map((run) => run.startedAt));
+  const completedAt = maxIso(runs.map((run) => run.completedAt));
+  return {
+    id: inputs.length === 1 ? runs[0].id || inputs[0].run.id : "combined",
+    startedAt,
+    completedAt,
+    accountId: sameValue(runs.map((run) => run.accountId)),
+    warnings: uniqueValues(runs.flatMap((run) => run.warnings || [])),
+    config: combineRunConfig(runs),
+  };
+}
+
+function combineRunConfig(runs) {
+  const config = structuredClone(runs[0]?.config || {});
+  const benchmark = combineBenchmarkConfig(runs.map((run) => run.config?.benchmark || {}));
+  return { ...config, benchmark };
+}
+
+function combineBenchmarkConfig(benchmarks) {
+  const first = benchmarks[0] || {};
+  const measuredRequests = sumNumeric(benchmarks.map((benchmark) => benchmark.measuredRequests));
+  const minSuccessfulRequests = maxNumeric(benchmarks.map((benchmark) => benchmark.minSuccessfulRequests));
+  return {
+    ...first,
+    warmupRequests: sameValue(benchmarks.map((benchmark) => benchmark.warmupRequests)) ?? first.warmupRequests,
+    measuredRequests: measuredRequests ?? first.measuredRequests,
+    minSuccessfulRequests: minSuccessfulRequests ?? first.minSuccessfulRequests,
+    splitInRounds: sameValue(benchmarks.map((benchmark) => benchmark.splitInRounds)) ?? first.splitInRounds,
+    queriesPerRequest: sameValue(benchmarks.map((benchmark) => benchmark.queriesPerRequest)) ?? first.queriesPerRequest,
+    requestTimeoutMs: sameValue(benchmarks.map((benchmark) => benchmark.requestTimeoutMs)) ?? first.requestTimeoutMs,
+  };
+}
+
+function mergeMeasuredRuns(inputs) {
+  const measured = {};
+  for (const input of inputs) {
+    for (const [dbKey, byColo] of Object.entries(input.raw.measured || {})) {
+      const targetByColo = measured[dbKey] ||= {};
+      for (const [coloKey, byPlacement] of Object.entries(byColo || {})) {
+        const targetByPlacement = targetByColo[coloKey] ||= {};
+        for (const [placement, requests] of Object.entries(byPlacement || {})) {
+          targetByPlacement[placement] ||= [];
+          targetByPlacement[placement].push(...(requests || []));
+        }
+      }
+    }
+  }
+  return measured;
+}
+
+function buildRunSummary(run, path, index) {
+  const id = run.id || `run-${index + 1}`;
+  return {
+    id,
+    label: id,
+    startedAt: run.startedAt || null,
+    completedAt: run.completedAt || null,
+    sourcePath: relative(rootDir, path),
+    benchmark: serializeBenchmarkConfig(run.config && run.config.benchmark),
+  };
+}
+
+function minIso(values) {
+  const times = values.map((value) => Date.parse(value)).filter(Number.isFinite);
+  return times.length ? new Date(Math.min(...times)).toISOString() : null;
+}
+
+function maxIso(values) {
+  const times = values.map((value) => Date.parse(value)).filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)).toISOString() : null;
+}
+
+function sameValue(values) {
+  const present = values.filter((value) => value != null);
+  if (!present.length) return null;
+  return present.every((value) => value === present[0]) ? present[0] : null;
+}
+
+function sumNumeric(values) {
+  const nums = values.filter(isFiniteNumber);
+  return nums.length ? nums.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function maxNumeric(values) {
+  const nums = values.filter(isFiniteNumber);
+  return nums.length ? Math.max(...nums) : null;
+}
+
+function uniqueBy(values, keyFn) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const key = keyFn(value);
+    if (key == null || seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +349,7 @@ function buildModel(raw) {
       benchmark: serializeBenchmarkConfig(run.config && run.config.benchmark),
       minSuccessfulRequests,
     },
+    runs: raw.runs || [],
     databases,
     placements,
     pairs,
@@ -213,22 +357,27 @@ function buildModel(raw) {
   };
 }
 
-function buildRawModel(raw) {
+function buildRawModel(raw, inputs = [{ raw, run: (raw.runs || [buildRunSummary(raw.run || {}, "results/raw.json", 0)])[0] }]) {
   const run = raw.run || {};
-  const databases = buildDatabaseModels(raw);
-  const databaseByColoKey = Object.fromEntries(databases.flatMap((db) =>
-    db.colocations.map((colocatedDb) => [`${db.key}|${colocatedDb.coloKey}`, colocatedDb])
-  ));
   const minSuccessfulRequests = getMinSuccessfulRequests(run.config);
+  const databases = buildDatabaseModels(raw);
   const rows = [];
 
-  for (const [dbKey, byColo] of Object.entries(raw.measured || {})) {
-    for (const [coloKey, byPlacement] of Object.entries(byColo || {})) {
-      const db = databaseByColoKey[`${dbKey}|${coloKey}`];
-      if (!db) continue;
-      for (const [placement, requests] of Object.entries(byPlacement || {})) {
-        const measurements = getPairMeasurements({ requests, database: db });
-        rows.push(rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }));
+  for (const input of inputs) {
+    const inputRaw = input.raw;
+    const inputDatabases = buildDatabaseModels(inputRaw);
+    const databaseByColoKey = Object.fromEntries(inputDatabases.flatMap((db) =>
+      db.colocations.map((colocatedDb) => [`${db.key}|${colocatedDb.coloKey}`, colocatedDb])
+    ));
+    const minSuccessfulRequests = getMinSuccessfulRequests(inputRaw.run?.config);
+    for (const [dbKey, byColo] of Object.entries(inputRaw.measured || {})) {
+      for (const [coloKey, byPlacement] of Object.entries(byColo || {})) {
+        const db = databaseByColoKey[`${dbKey}|${coloKey}`];
+        if (!db) continue;
+        for (const [placement, requests] of Object.entries(byPlacement || {})) {
+          const measurements = getPairMeasurements({ requests, database: db });
+          rows.push(rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests, run: input.run }));
+        }
       }
     }
   }
@@ -242,6 +391,7 @@ function buildRawModel(raw) {
       benchmark: serializeBenchmarkConfig(run.config && run.config.benchmark),
       minSuccessfulRequests,
     },
+    runs: raw.runs || inputs.map((input) => input.run),
     databases,
     placements: raw.workerPlacements || [],
     rows,
@@ -284,7 +434,7 @@ function buildDatabaseModels(raw) {
   });
 }
 
-function rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests }) {
+function rawExplorePairRow({ db, placement, requests, measurements, minSuccessfulRequests, run }) {
   const successful = measurements.successful;
   const networkValues = successful.flatMap((request) => {
     const adjusted = adjustedTotalMs(request.body);
@@ -304,7 +454,11 @@ function rawExplorePairRow({ db, placement, requests, measurements, minSuccessfu
   const successCount = successful.length;
 
   return {
-    id: `${db.key}|${db.coloKey}|${placement}`,
+    id: `${run.id}|${db.key}|${db.coloKey}|${placement}`,
+    runId: run.id,
+    runLabel: run.label || run.id,
+    runStartedAt: run.startedAt || null,
+    runCompletedAt: run.completedAt || null,
     dbKey: db.key,
     dbLabel: db.d1Colo ? `${db.label} / ${db.d1Colo}` : db.label,
     d1ColoKey: db.coloKey,
@@ -581,7 +735,7 @@ function rawFilterFacets(rows) {
 
 function rawFacetCounts(rows) {
   const result = {};
-  for (const key of ["db", "placement", "placementColo", "workerColo", "d1Region", "d1Colo", "note"]) {
+  for (const key of ["run", "db", "placement", "placementColo", "workerColo", "d1Region", "d1Colo", "note"]) {
     result[key] = {};
   }
   for (const row of rows) {
@@ -595,6 +749,7 @@ function rawFacetCounts(rows) {
 }
 
 function rawFilterEntries(row, key) {
+  if (key === "run") return [[rawLabelValue(row.runId), row.measuredQueryCount || 0]];
   if (key === "db") return [[rawLabelValue(row.dbKey), row.measuredQueryCount || 0]];
   if (key === "placement") return [[rawLabelValue(row.placement), row.requestCount || 0]];
   if (key === "placementColo") return rawCountEntries(row.placementColoCounts, row.placementColoValues || [row.placementColo]);

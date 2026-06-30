@@ -50,11 +50,16 @@ function dbLabel(key) {
   const db = MODEL.databases.find(d => d.key === key);
   return db ? (db.observedRegion || db.label || key) : key;
 }
+function runLabel(key) {
+  const run = (MODEL.runs || []).find(item => item.id === key);
+  return run ? run.label || run.id : key;
+}
 function noteValues(row) {
   const values = row.noteValues || row.notes || (row.note ? [row.note] : []);
   return values.length ? values : [null];
 }
 const FILTERS = {
+  run: { label: "Run", values: row => [row.runId], text: runLabel },
   db: { label: "D1 target", values: row => [row.dbKey], text: dbLabel },
   placement: { label: "Worker target", values: row => [row.placement] },
   placementColo: { label: "Worker placement colo", values: row => row.placementColoValues || [row.placementColo] },
@@ -88,6 +93,7 @@ function countCategory(rows, key) {
   }, {});
 }
 function filterCountEntries(row, key) {
+  if (key === "run") return filterValues(row, key).map(value => [value, row.measuredQueryCount || 0]);
   if (key === "db") return filterValues(row, key).map(value => [value, row.measuredQueryCount || 0]);
   if (key === "placement") return filterValues(row, key).map(value => [value, row.requestCount || 0]);
   if (key === "placementColo") return countEntries(row.placementColoCounts, filterValues(row, key));
@@ -115,6 +121,7 @@ function pillHtml(key, value, count) {
 }
 function runStamp() {
   const r = MODEL.run || {};
+  const runs = MODEL.runs || [];
   const start = new Date(r.startedAt || r.completedAt);
   if (isNaN(start)) {
     return '<div class="raw-run">' + esc(r.id || "") + '</div>';
@@ -125,7 +132,7 @@ function runStamp() {
   let time = start.toLocaleTimeString("en-US", timeOpts);
   const end = new Date(r.completedAt);
   if (!isNaN(end)) time += "–" + end.toLocaleTimeString("en-US", timeOpts);
-  return '<div class="raw-run">Measured ' + esc(date) + ' · ' + esc(time) + ' UTC</div>';
+  return '<div class="raw-run">Measured ' + (runs.length > 1 ? esc(runs.length + " runs") + " · " : "") + esc(date) + ' · ' + esc(time) + ' UTC</div>';
 }
 function render() {
   if (rawClusterize && typeof rawClusterize.destroy === "function") {
@@ -146,7 +153,7 @@ function render() {
   else updateLoadingProgress();
 }
 
-const FILTER_ORDER = ["db", "d1Region", "d1Colo", "placement", "placementColo", "workerColo", "note"];
+const FILTER_ORDER = ["run", "db", "d1Region", "d1Colo", "placement", "placementColo", "workerColo", "note"];
 const PROVIDER_FACETS = { placement: true };
 const PROV_LABEL = { aws: "AWS", gcp: "GCP", azure: "Azure" };
 const PROV_ORDER = ["aws", "gcp", "azure"];
@@ -234,6 +241,7 @@ function fmtUnit(v) {
 
 function rawTable() {
   const cols = [
+    ["run", "Run"],
     ["db", "D1 target"],
     ["placement", "Worker target"],
     ["request", "Requests"],
@@ -268,7 +276,7 @@ function loadingOverlay() {
 
 function renderRawRows() {
   const rows = sortedRows(filteredRows());
-  const columns = 9;
+  const columns = 10;
   const scale = networkScale();
   const rowMarkup = rows.map(row => rawRowHtml(row, scale));
   const empty = '<tr class="clusterize-no-data"><td colspan="' + columns + '" class="empty">No rows match the filters.</td></tr>';
@@ -294,6 +302,7 @@ function renderRawRows() {
 
 function rawRowHtml(row, scale) {
   return '<tr class="raw-' + row.status + '">' +
+    '<td>' + esc(row.runLabel || row.runId || "-") + '</td>' +
     '<td>' + esc(row.dbLabel) + '</td>' +
     '<td class="l">' + esc(row.placement) + '</td>' +
     '<td>' + esc(requestLabel(row)) + '</td>' +
@@ -334,7 +343,8 @@ function sortedRows(rows) {
   const key = state.sort;
   return rows.slice().sort((a, b) => {
     let av, bv;
-    if (key === "db") { av = a.dbLabel; bv = b.dbLabel; }
+    if (key === "run") { av = a.runStartedAt || a.runLabel || a.runId; bv = b.runStartedAt || b.runLabel || b.runId; }
+    else if (key === "db") { av = a.dbLabel; bv = b.dbLabel; }
     else if (key === "request") { av = requestSortValue(a); bv = requestSortValue(b); }
     else { av = a[key]; bv = b[key]; }
     if (av == null && bv == null) return 0;

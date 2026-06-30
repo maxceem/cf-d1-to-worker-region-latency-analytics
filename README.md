@@ -16,9 +16,15 @@ This benchmark measures the latency between D1 and a Worker when that Worker is 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/). Each discovery wave tries to find one new D1 colocation per D1 location, retrying already tested colocations until `databaseDiscoveryAttemptsPerRegion` is exhausted for that location. Newly observed D1 colocations are benchmarked against every Worker batch, then results are written under `results/<date-time>/raw.json`, the static report is built, and opened.
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/).
 
-`workerRequestsPer24Hours` limits benchmark Worker calls with a rolling 24-hour window. The default is `80000`; when the window is full, the script pauses until capacity becomes available. Resume uses the budget history saved in the selected results folder, while a new run starts with an empty budget.
+The `CLOUDFLARE_API_TOKEN` needs these account permissions:
+
+- `D1:Edit`
+- `Workers Scripts:Edit`
+- `Account Settings:Read` if you do not set `accountId` in config or `CLOUDFLARE_ACCOUNT_ID`
+
+### Resume
 
 Resume an incomplete run by passing its results folder:
 
@@ -26,19 +32,23 @@ Resume an incomplete run by passing its results folder:
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --resume results/2026-06-22_10-14-03_UTC
 ```
 
+### Retry Failed
+
 Retry failed target pairs from a completed run by passing its results folder:
 
 ```bash
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --retry-failed results/2026-06-24_11-55-26_UTC
 ```
 
-The retry uses the saved run config, creates disposable D1 databases only for needed target locations, and spends up to `databaseDiscoveryAttemptsPerRegion` creation attempts per target location to find colocations that still have failed pairs.
+## Build Report
 
-The `CLOUDFLARE_API_TOKEN` needs these account permissions:
+Build a report from several completed runs by passing each results folder:
 
-- `D1:Edit`
-- `Workers Scripts:Edit`
-- `Account Settings:Read` if you do not set `accountId` in config or `CLOUDFLARE_ACCOUNT_ID`
+```bash
+npm run build:site -- results/2026-06-24_11-55-26_UTC results/2026-06-27_05-07-42_UTC
+```
+
+The report pools matching D1 and Worker pairs across all selected runs. The Explore Data page includes a Run filter for inspecting one run at a time.
 
 ## Partial Run
 
@@ -61,7 +71,7 @@ And then run benchmark using partial config:
 CLOUDFLARE_API_TOKEN=... npm run benchmark -- --config benchmark.config.partial.json
 ```
 
-## Worker Region Finder
+## Find the Best Worker Region for an Existing D1 Database
 
 Use the finder to benchmark Worker placements for an existing D1 database. It observes the D1 region, selects Worker placements from [data/finder/d1-provider-region-map.json](data/finder/d1-provider-region-map.json), writes results under `results-finder/<database-name>-<date-time>`, builds the report in that run folder under `site`, and opens it.
 
@@ -85,12 +95,6 @@ Preview tracked resources without deleting them:
 
 ```bash
 npm run cleanup -- --dry-run
-```
-
-Clean up only finder resources:
-
-```bash
-npm run cleanup -- finder
 ```
 
 ## License
