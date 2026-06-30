@@ -1,0 +1,22 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      clusterize.js:
+        specifier: ^1.0.0
+        version: 1.0.0
+
+packages:
+
+  clusterize.js@1.0.0:
+    resolution: {integrity: sha512-EEYhO8rOvw9JVaHLgEFdvvg9H6ug/GVl8KgakOoc9hg4FK6xmyYsC4B0Aw/QI6ClPxaGPKBetO+ISvCY8N/uUQ==}
+
+snapshots:
+
+  clusterize.js@1.0.0: {}

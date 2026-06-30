@@ -3,17 +3,15 @@
   "deleteD1DatabasesAfterRun": true,
   "workerNamePrefix": "d1-placement-bench",
   "workerCompatibilityDate": "2026-06-17",
-  "workerCompatibilityFlags": [
-    "nodejs_compat"
-  ],
+  "workerCompatibilityFlags": ["nodejs_compat"],
   "workerObservabilityEnabled": true,
   "maxWorkersPerBatch": 50,
   "workerRequestsPer24Hours": 80000,
   "databaseDiscoveryAttemptsPerRegion": 50,
   "benchmark": {
     "warmupRequests": 3,
-    "measuredRequests": 100,
-    "splitInRounds": 5,
+    "measuredRequests": 30,
+    "splitInRounds": 1,
     "minSuccessfulRequests": 5,
     "queriesPerRequest": 5,
     "requestTimeoutMs": 30000
