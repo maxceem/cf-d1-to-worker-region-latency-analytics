@@ -16,7 +16,7 @@ This benchmark measures the latency between D1 and a Worker when that Worker is 
 CLOUDFLARE_API_TOKEN=... npm run benchmark
 ```
 
-The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/*-regions.json](data/).
+The default run uses [benchmark.config.json](benchmark.config.json). It benchmarks all the D1 locations from [data/d1-locations.json](data/d1-locations.json) against all the Worker regions from [data/worker-regions.json](data/worker-regions.json).
 
 The `CLOUDFLARE_API_TOKEN` needs these account permissions:
 

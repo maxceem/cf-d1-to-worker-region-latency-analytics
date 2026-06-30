@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
@@ -20,6 +20,7 @@ const VALID_D1_JURISDICTIONS = new Set(["eu", "fedramp"]);
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DATA_DIR = "data";
 const D1_LOCATIONS_FILE = "d1-locations.json";
+const WORKER_REGIONS_FILE = "worker-regions.json";
 const DEFAULT_CONFIG_PATH = "benchmark.config.json";
 const DEFAULT_AGGREGATE_FIELD = `${DEFAULT_AGGREGATE_METRIC}DbMs`;
 const WORKER_DEPLOY_RETRY_ATTEMPTS = 4;
@@ -29,10 +30,23 @@ const WORKER_DEPLOY_VERIFY_DELAY_MS = 3000;
 const WORKER_REQUEST_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WORKER_REQUEST_BUCKET_MS = 60 * 1000;
 const WORKER_REQUEST_BUDGET_FILE = "worker-request-budget.json";
+const FORCE_INTERRUPT_GRACE_MS = 1500;
 let cachedWranglerInvocation;
 let activeRunContext;
-let terminationCleanupStarted = false;
 let resumeCommandsPrinted = false;
+let interruptRequested = false;
+let interruptReason;
+let interruptRequestedAt = 0;
+let duplicateInterruptLogged = false;
+let activeInterruptController;
+
+class BenchmarkInterruptedError extends Error {
+  constructor(reason = "interrupt") {
+    super(`Benchmark interrupted by ${reason}.`);
+    this.name = "BenchmarkInterruptedError";
+    this.reason = reason;
+  }
+}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -229,7 +243,7 @@ async function main() {
 
             if (config.propagationSeconds > 0) {
               progress.log(`Starting Worker propagation wait (${config.propagationSeconds}s)...`);
-              await sleep(config.propagationSeconds * 1000);
+              await sleepInterruptibly(config.propagationSeconds * 1000);
               progress.recordPropagationWait();
               progress.log(`Finished Worker propagation wait (${config.propagationSeconds}s).`);
             }
@@ -399,38 +413,74 @@ function parseArgs(argv) {
 
 function installTerminationHandlers() {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-    process.once(signal, () => {
-      void handleTermination(signal);
+    process.on(signal, () => {
+      requestInterrupt(signal);
     });
   }
 
   process.once("uncaughtException", (error) => {
     console.error(error.stack || error.message);
-    void handleTermination("uncaughtException");
+    requestInterrupt("uncaughtException");
   });
 
   process.once("unhandledRejection", (reason) => {
     console.error(reason instanceof Error ? reason.stack || reason.message : reason);
-    void handleTermination("unhandledRejection");
+    requestInterrupt("unhandledRejection");
   });
 }
 
-async function handleTermination(reason) {
-  if (terminationCleanupStarted) return;
-  terminationCleanupStarted = true;
-
-  console.warn(`Benchmark interrupted by ${reason}; attempting cleanup for current run...`);
-  if (activeRunContext) {
-    try {
-      await cleanupRegisteredResources(activeRunContext);
-    } catch (error) {
-      console.warn(`Automatic cleanup did not complete: ${error.message}`);
+function requestInterrupt(reason) {
+  if (interruptRequested) {
+    const elapsedMs = Date.now() - interruptRequestedAt;
+    if (elapsedMs >= FORCE_INTERRUPT_GRACE_MS) {
+      console.error(`Force stop requested by ${reason}; exiting without waiting for cleanup.`);
+      process.exit(130);
+    } else if (!duplicateInterruptLogged) {
+      duplicateInterruptLogged = true;
+      console.warn("Additional interrupt received; press Ctrl+C again to force stop.");
     }
-    printResumeCommands(activeRunContext);
+    return;
   }
 
-  process.exitCode = 1;
-  process.exit();
+  interruptRequested = true;
+  interruptReason = reason;
+  interruptRequestedAt = Date.now();
+  process.exitCode = 130;
+  console.warn(`Benchmark interrupted by ${reason}; stopping work and running cleanup...`);
+  activeInterruptController?.abort();
+}
+
+function throwIfInterrupted() {
+  if (interruptRequested) {
+    throw new BenchmarkInterruptedError(interruptReason);
+  }
+}
+
+function isBenchmarkInterruptedError(error) {
+  return error instanceof BenchmarkInterruptedError || error?.name === "BenchmarkInterruptedError";
+}
+
+async function withInterruptSignal(fn) {
+  throwIfInterrupted();
+  const controller = new AbortController();
+  activeInterruptController = controller;
+  try {
+    return await fn(controller.signal);
+  } catch (error) {
+    if (interruptRequested && error?.name === "AbortError") {
+      throw new BenchmarkInterruptedError(interruptReason);
+    }
+    throw error;
+  } finally {
+    if (activeInterruptController === controller) {
+      activeInterruptController = undefined;
+    }
+    throwIfInterrupted();
+  }
+}
+
+async function sleepInterruptibly(ms) {
+  await withInterruptSignal((signal) => sleep(ms, undefined, { signal }));
 }
 
 function requireValue(argv, index, flag) {
@@ -450,7 +500,7 @@ function printHelp() {
 
 Default behavior:
   Loads benchmark.config.json, creates D1 databases from data/d1-locations.json, expands Worker
-  placements from data/*-regions.json, deploys Workers in batches of up to maxWorkersPerBatch,
+  placements from data/worker-regions.json, deploys Workers in batches of up to maxWorkersPerBatch,
   and tests every selected D1 x Worker placement pair.
 
 Environment:
@@ -611,6 +661,8 @@ function removeColocationResults(results, colocations) {
 async function loadBenchmarkData(rootDir) {
   const dataDir = path.resolve(rootDir, DATA_DIR);
   const d1Data = JSON.parse(await readFile(path.join(dataDir, D1_LOCATIONS_FILE), "utf8"));
+  const workerRegionsPath = path.join(DATA_DIR, WORKER_REGIONS_FILE);
+  const workerRegionsData = JSON.parse(await readFile(path.join(dataDir, WORKER_REGIONS_FILE), "utf8"));
   if (
     !Array.isArray(d1Data.locations) ||
     d1Data.locations.length === 0 ||
@@ -619,33 +671,32 @@ async function loadBenchmarkData(rootDir) {
     throw new Error(`${path.join(DATA_DIR, D1_LOCATIONS_FILE)} must contain a non-empty string locations array.`);
   }
 
-  const regionFiles = (await readdir(dataDir))
-    .filter((fileName) => fileName.endsWith("-regions.json"))
-    .sort();
-  if (regionFiles.length === 0) {
-    throw new Error(`${DATA_DIR} must contain at least one *-regions.json file.`);
+  if (!Array.isArray(workerRegionsData.providers) || workerRegionsData.providers.length === 0) {
+    throw new Error(`${workerRegionsPath} must contain a non-empty providers array.`);
   }
 
   const providers = new Set();
   const workerPlacements = [];
-  for (const fileName of regionFiles) {
-    const relativePath = path.join(DATA_DIR, fileName);
-    const regionData = JSON.parse(await readFile(path.join(dataDir, fileName), "utf8"));
-    if (typeof regionData.provider !== "string" || regionData.provider.length === 0) {
-      throw new Error(`${relativePath} must contain a non-empty provider string.`);
+  for (const [providerIndex, providerData] of workerRegionsData.providers.entries()) {
+    const providerPath = `${workerRegionsPath}.providers[${providerIndex}]`;
+    if (!providerData || typeof providerData !== "object" || Array.isArray(providerData)) {
+      throw new Error(`${providerPath} must be an object.`);
     }
-    if (providers.has(regionData.provider)) {
-      throw new Error(`${relativePath} declares duplicate provider ${regionData.provider}.`);
+    if (typeof providerData.provider !== "string" || providerData.provider.length === 0) {
+      throw new Error(`${providerPath}.provider must be a non-empty string.`);
     }
-    providers.add(regionData.provider);
+    if (providers.has(providerData.provider)) {
+      throw new Error(`${workerRegionsPath} declares duplicate provider ${providerData.provider}.`);
+    }
+    providers.add(providerData.provider);
     if (
-      !Array.isArray(regionData.regions) ||
-      regionData.regions.length === 0 ||
-      regionData.regions.some((region) => typeof region !== "string" || !region)
+      !Array.isArray(providerData.regions) ||
+      providerData.regions.length === 0 ||
+      providerData.regions.some((region) => typeof region !== "string" || !region)
     ) {
-      throw new Error(`${relativePath} must contain a non-empty string regions array.`);
+      throw new Error(`${providerPath}.regions must be a non-empty string array.`);
     }
-    workerPlacements.push(...regionData.regions.map((region) => `${regionData.provider}:${region}`));
+    workerPlacements.push(...providerData.regions.map((region) => `${providerData.provider}:${region}`));
   }
 
   return {
@@ -659,10 +710,10 @@ function validateConfig(config, benchmarkData) {
     throw new Error("Config must be a JSON object.");
   }
   if ("regionFiles" in config) {
-    throw new Error("regionFiles was removed. Add provider fields to data/*-regions.json instead.");
+    throw new Error("regionFiles is not supported. Worker regions are loaded from data/worker-regions.json.");
   }
   if ("candidateProviders" in config) {
-    throw new Error("candidateProviders was removed. All data/*-regions.json files are used by default.");
+    throw new Error("candidateProviders is not supported. Worker regions are loaded from data/worker-regions.json.");
   }
   requireString(config.d1DatabaseNamePrefix, "d1DatabaseNamePrefix");
   requireBoolean(config.deleteD1DatabasesAfterRun, "deleteD1DatabasesAfterRun");
@@ -927,6 +978,7 @@ function createWorkerRequestLimiter({ config, rawResult, resultsDir, progress })
   return {
     async waitForSlot() {
       while (true) {
+        throwIfInterrupted();
         const now = Date.now();
         const budget = ensureWorkerRequestBudget(rawResult, { limit, windowMs, bucketMs });
         pruneWorkerRequestBuckets(budget, now);
@@ -939,7 +991,7 @@ function createWorkerRequestLimiter({ config, rawResult, resultsDir, progress })
         progress.log(`Worker request budget reached (${used}/${limit} in rolling 24h); pausing until ${resumeAt}.`);
         await persistWorkerRequestBudget(resultsDir, budget);
         await persistProgress(resultsDir, rawResult);
-        await sleep(waitMs);
+        await sleepInterruptibly(waitMs);
       }
     },
     async recordRequest() {
@@ -1443,7 +1495,7 @@ async function benchmarkDatabases({
 
       if (config.propagationSeconds > 0) {
         progress.log(`Starting Worker propagation wait (${config.propagationSeconds}s)...`);
-        await sleep(config.propagationSeconds * 1000);
+        await sleepInterruptibly(config.propagationSeconds * 1000);
         progress.recordPropagationWait();
         progress.log(`Finished Worker propagation wait (${config.propagationSeconds}s).`);
       }
@@ -1776,6 +1828,7 @@ async function deployWorkers({ auth, accountId, config, databases, placements, b
   const workers = [];
 
   for (const placement of placements) {
+    throwIfInterrupted();
     const workerName = sanitizeWorkerName(`${config.workerNamePrefix}-b${batchIndex + 1}-w${discoveryWaveIndex + 1}-${placement}`);
     const started = performance.now();
     progress.log(`Starting Worker deployment: ${workerName} (${placement})...`);
@@ -1853,6 +1906,7 @@ async function deployWorkers({ auth, accountId, config, databases, placements, b
 
 async function deployWorkerWithRetry({ auth, workerName, placement, configPath, accountId, progress }) {
   for (let attempt = 1; attempt <= WORKER_DEPLOY_RETRY_ATTEMPTS; attempt += 1) {
+    throwIfInterrupted();
     progress.log(`Starting Worker deploy attempt ${attempt}/${WORKER_DEPLOY_RETRY_ATTEMPTS}: ${workerName} (${placement})...`);
     try {
       const output = await runWrangler(["deploy", "--config", configPath, "--minify"], {
@@ -1883,7 +1937,7 @@ async function deployWorkerWithRetry({ auth, workerName, placement, configPath, 
       progress.warn(
         `Worker deploy failed with a retryable Cloudflare API error; retrying in ${Math.round(WORKER_DEPLOY_RETRY_DELAY_MS / 1000)}s (${attempt + 1}/${WORKER_DEPLOY_RETRY_ATTEMPTS})...`
       );
-      await sleep(WORKER_DEPLOY_RETRY_DELAY_MS);
+      await sleepInterruptibly(WORKER_DEPLOY_RETRY_DELAY_MS);
     }
   }
 }
@@ -1914,7 +1968,8 @@ async function waitForUploadedWorkerDeployment({ auth, accountId, workerName, pr
   const accountSubdomain = await getWorkersDevSubdomain(auth, accountId);
 
   for (let attempt = 1; attempt <= WORKER_DEPLOY_VERIFY_ATTEMPTS; attempt += 1) {
-    if (attempt > 1) await sleep(WORKER_DEPLOY_VERIFY_DELAY_MS);
+    throwIfInterrupted();
+    if (attempt > 1) await sleepInterruptibly(WORKER_DEPLOY_VERIFY_DELAY_MS);
     progress.log(`Verifying uploaded Worker ${workerName} (${attempt}/${WORKER_DEPLOY_VERIFY_ATTEMPTS})...`);
 
     try {
@@ -2006,7 +2061,9 @@ async function copyWorkerSource(rootDir, tempDir) {
 async function runRequests({ worker, database, requests, queriesPerRequest, timeoutMs, progress, requestLimiter }) {
   const results = [];
   for (let requestIndex = 0; requestIndex < requests; requestIndex += 1) {
+    throwIfInterrupted();
     await requestLimiter.waitForSlot();
+    throwIfInterrupted();
     await requestLimiter.recordRequest();
     const started = performance.now();
     results[requestIndex] = await callBench(worker, database, queriesPerRequest, timeoutMs);
@@ -2109,10 +2166,16 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
 
   const started = performance.now();
   const controller = new AbortController();
+  const abortForInterrupt = () => controller.abort();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let interruptSignal;
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await withInterruptSignal(async (signal) => {
+      interruptSignal = signal;
+      interruptSignal.addEventListener("abort", abortForInterrupt, { once: true });
+      return fetch(url, { signal: controller.signal });
+    });
     const clientMs = performance.now() - started;
     const placementHeader = response.headers.get("cf-placement");
     const placement = parsePlacementHeader(placementHeader);
@@ -2153,6 +2216,7 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
       body
     };
   } catch (error) {
+    if (isBenchmarkInterruptedError(error)) throw error;
     return {
       ok: false,
       status: 0,
@@ -2163,6 +2227,7 @@ async function callBench(worker, database, queriesPerRequest, timeoutMs) {
       error: error.name === "AbortError" ? "request_timeout" : error.message
     };
   } finally {
+    interruptSignal?.removeEventListener("abort", abortForInterrupt);
     clearTimeout(timeout);
   }
 }
@@ -2729,6 +2794,12 @@ function redactConfig(config) {
 }
 
 main().catch((error) => {
+  if (isBenchmarkInterruptedError(error)) {
+    console.error("");
+    console.error(error.message);
+    process.exitCode = 130;
+    return;
+  }
   console.error("");
   console.error(error.stack || error.message);
   process.exitCode = 1;
